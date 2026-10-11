@@ -1,0 +1,6 @@
+# Python 3.10+ required.
+# pandas >= 2.2 is needed for the month-end resample alias "ME" used in metrics.py.
+pandas>=2.2,<4
+numpy>=1.26,<3
+requests>=2.31,<3
+openpyxl>=3.1,<4
