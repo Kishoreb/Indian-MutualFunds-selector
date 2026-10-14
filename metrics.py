@@ -4,47 +4,28 @@ metrics.py
 Pure calculation functions that turn a NAV history DataFrame
 (columns: date, nav) into the metrics used for shortlisting:
 
-    - CAGR over N years (1, 3, 5 ... configurable)
-    - Annualized volatility, downside deviation, max drawdown
-    - Risk-adjusted ratios (Sharpe-style and Sortino)
-    - Rolling-return consistency
-    - SIP XIRR
-    - Benchmark-relative metrics (beta, alpha, tracking error, information
-      ratio, up/down capture, excess CAGR, rolling beat %)
-    - Data-quality diagnostics (last NAV date, suspicious daily jumps)
-
-COMMON WINDOW: the risk metrics, the return leg of the Sharpe/Sortino
-ratios, the rolling stats and the benchmark-relative metrics are all
-computed over the same trailing `risk_window_years` window for every fund,
-so a fund isn't penalized for having lived through more market cycles than
-another. A fund without enough history gets None for those metrics.
+    - CAGR over N years (1, 3, 4 ... configurable)
+    - Annualized volatility (risk)
+    - Risk-adjusted return ratio (Sharpe-style)
+    - Max drawdown
 
 All functions are defensive: if there isn't enough history to compute a
 metric, they return None rather than raising, so a fund can still be
 scored on whatever metrics ARE available.
 """
 
-from __future__ import annotations
-
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 
-BENCH_KEYS = ["beta", "alpha", "tracking_error", "information_ratio",
-              "up_capture", "down_capture", "excess_cagr", "rolling_beat_pct",
-              "bench_months"]
-
 
 def _nav_on_or_before(df: pd.DataFrame, target_date) -> float | None:
-    """Finds the NAV on the closest available date on/before target_date.
-    Binary search (O(log n)); assumes df is sorted by date ascending, which
-    both the downloader and the cache loader guarantee."""
-    dates = df["date"].values
-    pos = int(np.searchsorted(dates, np.datetime64(pd.Timestamp(target_date)), side="right")) - 1
-    if pos < 0:
+    """Finds the NAV on the closest available date on/before target_date."""
+    subset = df[df["date"] <= target_date]
+    if subset.empty:
         return None
-    return float(df["nav"].iloc[pos])
+    return float(subset.iloc[-1]["nav"])
 
 
 def years_of_history(df: pd.DataFrame) -> float:
@@ -52,18 +33,6 @@ def years_of_history(df: pd.DataFrame) -> float:
         return 0.0
     span = df["date"].max() - df["date"].min()
     return span.days / 365.25
-
-
-def _window_start(df: pd.DataFrame, years: float) -> pd.Timestamp:
-    return df["date"].max() - pd.Timedelta(days=int(years * 365.25))
-
-
-def has_window_coverage(df: pd.DataFrame, years: float, tol_days: int = 45) -> bool:
-    """True if the NAV history reaches back (within tol_days) to the start
-    of the trailing `years` window."""
-    if df.empty:
-        return False
-    return df["date"].min() <= _window_start(df, years) + pd.Timedelta(days=tol_days)
 
 
 def calculate_cagr(df: pd.DataFrame, years: float) -> float | None:
@@ -85,6 +54,9 @@ def calculate_cagr(df: pd.DataFrame, years: float) -> float | None:
     if df["date"].min() > start_date + timedelta(days=30):
         return None
 
+    if years == 1:
+        # Simple 1-year return (equivalent to CAGR for a 1-year period).
+        return (end_nav / start_nav) - 1
     return (end_nav / start_nav) ** (1 / years) - 1
 
 
@@ -94,39 +66,20 @@ def calculate_monthly_returns(df: pd.DataFrame) -> pd.Series:
     return s.pct_change().dropna()
 
 
-def window_monthly_returns(df: pd.DataFrame, window_years: float | None = None) -> pd.Series:
-    """Monthly returns restricted to the trailing `window_years`. Returns an
-    EMPTY series if the fund doesn't have history covering the window (so
-    every fund is measured on the same footing or not at all)."""
-    r = calculate_monthly_returns(df)
-    if window_years is None:
-        return r
-    if not has_window_coverage(df, window_years):
-        return r.iloc[0:0]
-    return r[r.index > _window_start(df, window_years)]
-
-
-def calculate_volatility(df: pd.DataFrame, window_years: float | None = None) -> float | None:
+def calculate_volatility(df: pd.DataFrame) -> float | None:
     """Annualized volatility, derived from the standard deviation of
-    monthly returns (std * sqrt(12)) over the trailing window."""
-    monthly_returns = window_monthly_returns(df, window_years)
+    monthly returns (std * sqrt(12))."""
+    monthly_returns = calculate_monthly_returns(df)
     if len(monthly_returns) < 6:
         return None
     return float(monthly_returns.std() * np.sqrt(12))
 
 
-def calculate_max_drawdown(df: pd.DataFrame, window_years: float | None = None) -> float | None:
-    """Largest peak-to-trough decline within the trailing window, as a
-    NEGATIVE fraction (e.g. -0.32 means a 32% drawdown). Closer to zero is
-    better."""
+def calculate_max_drawdown(df: pd.DataFrame) -> float | None:
+    """Largest peak-to-trough decline over the fund's history, as a
+    negative fraction (e.g. -0.32 means a 32% drawdown)."""
     if df.empty:
         return None
-    if window_years is not None:
-        if not has_window_coverage(df, window_years):
-            return None
-        df = df[df["date"] >= _window_start(df, window_years)]
-        if df.empty:
-            return None
     nav = df.set_index("date")["nav"]
     running_max = nav.cummax()
     drawdown = (nav - running_max) / running_max
@@ -136,8 +89,8 @@ def calculate_max_drawdown(df: pd.DataFrame, window_years: float | None = None) 
 def calculate_risk_return_ratio(cagr: float | None, volatility: float | None,
                                  risk_free_rate: float) -> float | None:
     """Sharpe-style ratio: (return - risk free rate) / volatility.
-    The caller passes the CAGR measured over the SAME window as the
-    volatility."""
+    Uses the 3-year CAGR by convention as the "return" input from the
+    caller, but accepts whatever CAGR is passed in."""
     if cagr is None or volatility is None or volatility == 0:
         return None
     return (cagr - risk_free_rate) / volatility
@@ -147,20 +100,10 @@ def calculate_risk_return_ratio(cagr: float | None, volatility: float | None,
 # Downside deviation / Sortino ratio
 # ---------------------------------------------------------------------------
 
-def monthly_rate(annual_rate: float) -> float:
-    """Converts an annualized rate to its equivalent monthly rate."""
-    return (1 + annual_rate) ** (1 / 12) - 1
-
-
 def calculate_downside_deviation(monthly_returns: pd.Series, mar: float = 0.0) -> float | None:
     """Annualized downside deviation: like volatility, but only penalizes
-    returns that fall below the minimum acceptable return `mar` (a MONTHLY
-    rate), ignoring upside swings entirely.
-    sqrt(mean(min(r - mar, 0)^2)) * sqrt(12).
-
-    For a Sortino ratio whose numerator subtracts the risk-free rate, `mar`
-    should be the monthly risk-free rate so numerator and denominator use
-    the same hurdle."""
+    returns that fall below the minimum acceptable return (mar, default 0),
+    ignoring upside swings entirely. sqrt(mean(min(r - mar, 0)^2)) * sqrt(12)."""
     if len(monthly_returns) < 6:
         return None
     shortfalls = np.minimum(monthly_returns - mar, 0)
@@ -184,62 +127,43 @@ def calculate_rolling_returns(df: pd.DataFrame, window_years: float = 3.0) -> pd
     """Computes trailing CAGR at every month-end across the fund's history
     (not just as of today), so you can see how the fund performed across
     many different entry points rather than one lucky/unlucky snapshot.
-    Returns a Series of CAGR values indexed by the window's end date.
-
-    Note: consecutive monthly windows overlap almost completely, so these
-    values are strongly autocorrelated."""
+    Returns a Series of CAGR values indexed by the window's end date."""
     monthly_nav = df.set_index("date")["nav"].resample("ME").last().dropna()
-    if monthly_nav.empty:
-        return pd.Series(dtype=float)
     window_days = int(window_years * 365.25)
 
-    idx = monthly_nav.index
-    navs = monthly_nav.values.astype(float)
-    start_dates = idx - pd.Timedelta(days=window_days)
-    # For each month-end, the last month-end on/before its window start.
-    pos = idx.searchsorted(start_dates, side="right") - 1
-    valid = pos >= 0
-    safe_pos = np.where(valid, pos, 0)
-    # Require the available start point to be reasonably close to the target
-    # start date so short-history funds don't get spurious windows.
-    gap_ok = (start_dates - idx[safe_pos]) <= pd.Timedelta(days=45)
-    start_nav = navs[safe_pos]
-    ok = valid & gap_ok & (start_nav > 0)
+    values = {}
+    for end_date, end_nav in monthly_nav.items():
+        start_date = end_date - pd.Timedelta(days=window_days)
+        prior = monthly_nav[monthly_nav.index <= start_date]
+        if prior.empty:
+            continue
+        # Require the available start point to be reasonably close to the
+        # target start date so short-history funds don't get spurious windows.
+        if start_date - prior.index[-1] > pd.Timedelta(days=45):
+            continue
+        start_nav = prior.iloc[-1]
+        if start_nav <= 0:
+            continue
+        cagr = (end_nav / start_nav) ** (1 / window_years) - 1
+        values[end_date] = cagr
 
-    cagr = np.full(len(navs), np.nan)
-    cagr[ok] = (navs[ok] / start_nav[ok]) ** (1 / window_years) - 1
-    return pd.Series(cagr, index=idx, dtype=float).dropna()
-
-
-def _restrict_to_window(series: pd.Series, df: pd.DataFrame, within_years: float | None) -> pd.Series:
-    """Keeps only rolling windows that END inside the trailing common window."""
-    if within_years is None:
-        return series
-    return series[series.index > _window_start(df, within_years)]
+    return pd.Series(values, dtype=float)
 
 
-def rolling_return_stats(df: pd.DataFrame, window_years: float = 3.0,
-                         within_years: float | None = None, min_windows: int = 12,
-                         hurdle: float = 0.12) -> dict:
-    """Summarizes rolling returns into consistency metrics, using only the
-    rolling windows that END within the trailing `within_years` (so all funds
-    are judged over the same calendar period). Requires at least
-    `min_windows` windows, otherwise returns all None."""
-    empty = {"rolling_avg": None, "rolling_min": None, "rolling_positive_pct": None,
-             "rolling_above_hurdle_pct": None, "rolling_std": None, "rolling_windows": 0}
-    if within_years is not None and not has_window_coverage(df, within_years):
-        return empty
-    rolling = _restrict_to_window(calculate_rolling_returns(df, window_years), df, within_years)
-    if len(rolling) < min_windows:
-        return {**empty, "rolling_windows": int(len(rolling))}
+def rolling_return_stats(df: pd.DataFrame, window_years: float = 3.0) -> dict:
+    """Summarizes rolling returns into consistency metrics. Requires at
+    least 12 rolling windows (roughly 1 extra year beyond window_years of
+    history) to produce a meaningful stat, otherwise returns all None."""
+    rolling = calculate_rolling_returns(df, window_years)
+    if len(rolling) < 12:
+        return {"rolling_avg": None, "rolling_min": None,
+                "rolling_positive_pct": None, "rolling_std": None}
 
     return {
         "rolling_avg": float(rolling.mean()),
         "rolling_min": float(rolling.min()),
         "rolling_positive_pct": float((rolling > 0).mean()),
-        "rolling_above_hurdle_pct": float((rolling > hurdle).mean()),
         "rolling_std": float(rolling.std()),
-        "rolling_windows": int(len(rolling)),
     }
 
 
@@ -313,17 +237,17 @@ def calculate_sip_xirr(df: pd.DataFrame, years: float, monthly_amount: float = 1
         return None
 
     nav_indexed = df.set_index("date")["nav"].sort_index()
-    idx = nav_indexed.index
     total_units = 0.0
     cashflows = []
     for d in sip_dates:
-        pos = idx.searchsorted(d, side="left")  # first NAV date >= d
-        if pos >= len(idx):
+        avail = nav_indexed[nav_indexed.index >= d]
+        if avail.empty:
             continue
-        nav_on_date = nav_indexed.iloc[pos]
+        nav_on_date = avail.iloc[0]
+        actual_date = avail.index[0]
         units = monthly_amount / nav_on_date
         total_units += units
-        cashflows.append((idx[pos], -monthly_amount))
+        cashflows.append((actual_date, -monthly_amount))
 
     if total_units == 0 or len(cashflows) < 6:
         return None
@@ -335,145 +259,27 @@ def calculate_sip_xirr(df: pd.DataFrame, years: float, monthly_amount: float = 1
     return _xirr(cashflows)
 
 
-# ---------------------------------------------------------------------------
-# Data-quality diagnostics
-# ---------------------------------------------------------------------------
-
-def detect_nav_anomalies(df: pd.DataFrame, threshold: float = 0.20) -> tuple[int, float | None]:
-    """Counts day-over-day NAV moves larger than `threshold` (absolute).
-    Real diversified equity funds almost never move 20% in a day, so such
-    jumps usually mean a data error, an unadjusted unit split/merger, or a
-    scheme restructure. Returns (count, largest absolute daily move)."""
-    if len(df) < 2:
-        return 0, None
-    moves = df["nav"].pct_change().abs().dropna()
-    if moves.empty:
-        return 0, None
-    return int((moves > threshold).sum()), float(moves.max())
-
-
-# ---------------------------------------------------------------------------
-# Benchmark-relative metrics
-# ---------------------------------------------------------------------------
-
-def _geo_mean(returns: pd.Series) -> float | None:
-    if len(returns) == 0:
-        return None
-    return float(np.prod(1 + returns.values) ** (1 / len(returns)) - 1)
-
-
-def calculate_benchmark_stats(fund_df: pd.DataFrame, bench_df: pd.DataFrame,
-                              risk_free_rate: float, window_years: float,
-                              rolling_window_years: float = 3.0,
-                              min_coverage: float = 0.9,
-                              min_rolling_windows: int = 12) -> dict:
-    """Compares a fund to a benchmark NAV series over the common trailing
-    window, using aligned month-end returns.
-
-        beta               regression slope of fund excess return on benchmark excess return
-        alpha              annualized Jensen's alpha (monthly intercept x 12)
-        tracking_error     annualized std of (fund - benchmark) monthly returns
-        information_ratio  annualized mean active return / tracking error
-        up_capture         geometric fund return / geometric benchmark return, benchmark-up months
-        down_capture       same for benchmark-down months (LOWER is better)
-        excess_cagr        fund CAGR minus benchmark CAGR over the window
-        rolling_beat_pct   share of rolling windows (ending in the window) where fund CAGR > benchmark CAGR
-        bench_months       number of aligned months actually used
-
-    Returns all-None (bench_months still reported) if the aligned history
-    is shorter than `min_coverage` of the window."""
-    out = {k: None for k in BENCH_KEYS}
-    f = window_monthly_returns(fund_df, window_years)
-    b = calculate_monthly_returns(bench_df)
-    if f.empty or b.empty:
-        out["bench_months"] = 0
-        return out
-
-    joined = pd.concat([f.rename("f"), b.rename("b")], axis=1, join="inner").dropna()
-    out["bench_months"] = int(len(joined))
-    needed = max(24, int(round(window_years * 12 * min_coverage)))
-    if len(joined) < needed:
-        return out
-
-    rf_m = monthly_rate(risk_free_rate)
-    ex_f, ex_b = joined["f"] - rf_m, joined["b"] - rf_m
-    var_b = ex_b.var()
-    if not np.isfinite(var_b) or var_b == 0:
-        return out
-
-    beta = ex_f.cov(ex_b) / var_b
-    out["beta"] = float(beta)
-    out["alpha"] = float((ex_f.mean() - beta * ex_b.mean()) * 12)
-
-    active = joined["f"] - joined["b"]
-    te = active.std() * np.sqrt(12)
-    out["tracking_error"] = float(te)
-    out["information_ratio"] = float(active.mean() * 12 / te) if te and te > 1e-9 else None
-
-    up, down = joined[joined["b"] > 0], joined[joined["b"] < 0]
-    if len(up) >= 6:
-        gb = _geo_mean(up["b"])
-        gf = _geo_mean(up["f"])
-        out["up_capture"] = float(gf / gb) if gb and abs(gb) > 1e-9 else None
-    if len(down) >= 6:
-        gb = _geo_mean(down["b"])
-        gf = _geo_mean(down["f"])
-        out["down_capture"] = float(gf / gb) if gb and abs(gb) > 1e-9 else None
-
-    n = len(joined)
-    cagr_f = float(np.prod(1 + joined["f"].values) ** (12 / n) - 1)
-    cagr_b = float(np.prod(1 + joined["b"].values) ** (12 / n) - 1)
-    out["excess_cagr"] = cagr_f - cagr_b
-
-    roll_f = _restrict_to_window(calculate_rolling_returns(fund_df, rolling_window_years), fund_df, window_years)
-    roll_b = calculate_rolling_returns(bench_df, rolling_window_years)
-    both = pd.concat([roll_f.rename("f"), roll_b.rename("b")], axis=1, join="inner").dropna()
-    if len(both) >= min_rolling_windows:
-        out["rolling_beat_pct"] = float((both["f"] > both["b"]).mean())
-
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Everything for one fund
-# ---------------------------------------------------------------------------
-
 def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
                          sip_years: float = 3.0, sip_monthly_amount: float = 1000.0,
-                         rolling_window_years: float = 3.0,
-                         risk_window_years: float = 5.0,
-                         nav_jump_threshold: float = 0.20,
-                         rolling_min_windows: int = 12,
-                         rolling_hurdle: float = 0.12) -> dict:
-    """Computes the full (benchmark-independent) metrics dict for one fund's
-    NAV history. Risk metrics, the Sharpe/Sortino return leg and rolling
-    stats are all measured over the trailing `risk_window_years`."""
-    df = df.sort_values("date").reset_index(drop=True)  # lookups below rely on date order
-
+                         rolling_window_years: float = 3.0) -> dict:
+    """Computes the full metrics dict for one fund's NAV history."""
     cagr_1y = calculate_cagr(df, 1)
     cagr_3y = calculate_cagr(df, 3)
     cagr_5y = calculate_cagr(df, 5)
+    volatility = calculate_volatility(df)
+    max_dd = calculate_max_drawdown(df)
 
-    volatility = calculate_volatility(df, risk_window_years)
-    max_dd = calculate_max_drawdown(df, risk_window_years)
+    # Use 3-year CAGR (falling back to 5y, then 1y) as the "return" leg of
+    # the risk-adjusted ratios, since it best balances recency and stability.
+    return_for_ratio = cagr_3y if cagr_3y is not None else (cagr_5y if cagr_5y is not None else cagr_1y)
+    risk_return_ratio = calculate_risk_return_ratio(return_for_ratio, volatility, risk_free_rate)
 
-    # Return leg of the ratios is measured over the SAME window as the risk
-    # leg (previously 3y CAGR was divided by full-history volatility).
-    cagr_window = calculate_cagr(df, risk_window_years)
-    risk_return_ratio = calculate_risk_return_ratio(cagr_window, volatility, risk_free_rate)
+    monthly_returns = calculate_monthly_returns(df)
+    downside_dev = calculate_downside_deviation(monthly_returns)
+    sortino_ratio = calculate_sortino_ratio(return_for_ratio, downside_dev, risk_free_rate)
 
-    monthly_window = window_monthly_returns(df, risk_window_years)
-    # MAR = monthly risk-free rate so Sortino's numerator and denominator
-    # share the same hurdle.
-    downside_dev = calculate_downside_deviation(monthly_window, mar=monthly_rate(risk_free_rate))
-    sortino_ratio = calculate_sortino_ratio(cagr_window, downside_dev, risk_free_rate)
-
-    rolling_stats = rolling_return_stats(
-        df, window_years=rolling_window_years, within_years=risk_window_years,
-        min_windows=rolling_min_windows, hurdle=rolling_hurdle)
+    rolling_stats = rolling_return_stats(df, window_years=rolling_window_years)
     sip_xirr = calculate_sip_xirr(df, years=sip_years, monthly_amount=sip_monthly_amount)
-
-    n_anom, max_move = detect_nav_anomalies(df, nav_jump_threshold)
 
     return {
         "cagr_1y": cagr_1y,
@@ -487,12 +293,7 @@ def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
         "rolling_avg": rolling_stats["rolling_avg"],
         "rolling_min": rolling_stats["rolling_min"],
         "rolling_positive_pct": rolling_stats["rolling_positive_pct"],
-        "rolling_above_hurdle_pct": rolling_stats["rolling_above_hurdle_pct"],
         "rolling_std": rolling_stats["rolling_std"],
-        "rolling_windows": rolling_stats["rolling_windows"],
         "sip_xirr": sip_xirr,
         "history_years": years_of_history(df),
-        "last_nav_date": df["date"].max().strftime("%Y-%m-%d") if not df.empty else None,
-        "nav_anomalies": n_anom,
-        "max_daily_move": max_move,
     }

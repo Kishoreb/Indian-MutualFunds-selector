@@ -2,258 +2,224 @@
 
 A small Python toolkit that shortlists mutual funds **by category** —
 just tell it "small cap", "midcap", "large cap", "flexi cap", "elss", etc.
-It combines 1/3/5-year CAGR, volatility, Sharpe-style and Sortino ratios,
-rolling 3-year consistency, simulated SIP XIRR, max drawdown and
-**benchmark-relative skill** (alpha, beta, information ratio, up/down capture,
-rolling beat %), using category-relative hard cut-offs and a weighted composite
-score.
+It scores funds on:
 
-Everything is fetched live from the internet, no manual fund list needed:
-- The full universe of mutual fund schemes comes from AMFI's scheme master
-  (via [mfapi.in](https://www.mfapi.in/), a free mirror — no API key needed).
-- NAV history for each candidate fund is pulled from the same source, in parallel.
+- 1/3/5-year CAGR, volatility, a Sharpe-style risk-return ratio, a Sortino
+  ratio (downside-only risk), rolling 3-year return consistency, simulated
+  SIP XIRR and max drawdown;
+- **benchmark-relative** performance: excess return over, and rolling
+  win-rate against, the category benchmark (`benchmark.py`);
+- a **portfolio-quality** score (0–100) built from the AMC's disclosed
+  monthly holdings (`portfolio_quality.py`).
+
+Hard cutoffs filter funds out first; a weighted composite score ranks the rest.
+
+Data sources:
+- The universe of mutual fund schemes and each fund's NAV history come from
+  AMFI's scheme master via [mfapi.in](https://www.mfapi.in/) (free, no API key).
+- Benchmark series: a local TRI CSV you supply, or an index fund tracking the
+  benchmark index (also from mfapi.in) as a proxy.
+- Holdings: monthly portfolio Excel files published by each AMC (see
+  "Portfolio quality" below for what is and isn't automated).
 
 ## Files
 
-| File                | Purpose                                                                |
-|---------------------|-------------------------------------------------------------------------|
-| `config.py`         | All tunable thresholds, score weights, risk-free rate, windows, output settings |
-| `fund_universe.py`  | AMFI scheme master → candidates by category + plan type; AMFI-category verification |
-| `fetch_nav_data.py` | Parallel NAV download with retries + local cache                      |
-| `metrics.py`        | CAGR, volatility, Sharpe/Sortino, rolling returns, SIP XIRR, drawdown, benchmark stats, data-quality checks |
-| `benchmark.py`      | Builds the benchmark: an index-fund proxy or the category average      |
-| `report.py`         | Styled Excel workbook (Shortlist, Excluded, Run settings sheets)       |
-| `logutil.py`        | Logging helper: readable console output, optional timestamped log file |
-| `manifest.py`       | Writes `run_manifest.json` (audit trail for each run)                  |
-| `shortlist.py`      | Main script: category → fetch → quality gate → benchmark → filter → score → rank |
-| `test_pipeline.py`  | Offline synthetic-data tests (`python test_pipeline.py`)               |
+| File                       | Purpose                                                                 |
+|----------------------------|--------------------------------------------------------------------------|
+| `config.py`                | All thresholds, score weights, benchmark map, portfolio-quality rubric   |
+| `fund_universe.py`         | Fetches the AMFI scheme master and filters it by category + plan type    |
+| `fetch_nav_data.py`        | Downloads & caches NAV history per scheme code                           |
+| `metrics.py`               | CAGR, volatility, risk-return ratio, Sortino, rolling returns, SIP XIRR, max drawdown |
+| `benchmark.py`             | Benchmark data (CSV / pinned code / auto-discovered index-fund proxy), excess return, rolling beat-benchmark % |
+| `portfolio_quality.py`     | Parses AMC portfolio workbooks and computes the 0–100 portfolio-quality score |
+| `holdings_fetch.py`        | Downloads monthly portfolio files for the AMCs that can be automated     |
+| `amc_registry.py`          | Per-AMC knowledge: disclosure page, whether it can be automated, notes   |
+| `report.py`                | Formats the ranked shortlist as a styled Excel workbook                  |
+| `shortlist.py`             | Main script: category → candidates → fetch → metrics → filter → score → rank → CSV + Excel |
+| `test_benchmark.py`, `test_portfolio_quality.py` | Offline tests (synthetic data, no network)         |
+| `requirements.txt`         | Python dependencies                                                      |
+
+Keep all `.py` files in one folder. Data is created under `./data/`.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt     # needs Python 3.10+ and pandas >= 2.2
+pip install -r requirements.txt
 ```
 
-## Run it
+`xlrd` is only needed for old `.xls` portfolio files (Nippon India and Baroda
+BNP Paribas publish those).
+
+## 1. Run it — just name a category
 
 ```bash
 python shortlist.py "small cap"
 python shortlist.py midcap
-python shortlist.py "large cap" --refresh              # force re-download instead of using cache
-python shortlist.py "mid cap" --benchmark 123456       # pin a benchmark proxy by scheme code
-python shortlist.py "flexi cap" --benchmark category   # use the category average as benchmark
-python shortlist.py elss --benchmark none --top 10
-python shortlist.py "small cap" --window 5 --filter-mode both
-python shortlist.py my_funds.csv                       # CSV with a 'scheme_code' column
-python shortlist.py "mid cap" --verbose                # debug-level console output
-python shortlist.py "mid cap" --quiet --log-file run.log   # warnings only on screen, full log to a file
+python shortlist.py "large cap"
+python shortlist.py "flexi cap" --refresh          # force re-download instead of using cache
+python shortlist.py "small cap" --fetch-holdings   # also try the AMC portfolio downloaders first
 ```
 
 Supported categories (case/spacing/hyphens don't matter): `small cap`,
 `mid cap`, `large cap`, `multi cap`, `flexi cap`, `large & mid cap`, `elss`,
-`focused`, `value`, `contra`, `dividend yield`, `sectoral`.
+`focused`, `value`, `contra`, `dividend yield`, `sectoral`. Run
+`python shortlist.py` with no arguments to see this list any time.
 
-Outputs: `shortlisted_funds.csv`, `shortlisted_funds.xlsx`,
-`excluded_funds.csv` (every dropped fund and the reason) and
-`run_manifest.json`.
+This will:
+1. Fetch (or load cached) AMFI's full scheme list and filter it to every
+   **Direct + Growth** plan fund whose name matches the category
+2. Download (or load cached) NAV history for each candidate fund
+3. Compute the performance, risk and consistency metrics
+4. Add benchmark-relative metrics (benchmark per fund category, see below)
+5. Add the portfolio-quality score where a matching, fresh portfolio file exists
+6. Drop funds that fail the hard filters in `config.py`
+7. Score the rest with a weighted, z-scored composite score and rank them
+8. Print the top funds and write the full ranked list to `shortlisted_funds.csv`
+   and a formatted `shortlisted_funds.xlsx`
 
-### Reproducibility: `run_manifest.json`
+You can also pass a CSV with a `scheme_code` column instead of a category,
+e.g. `python shortlist.py my_funds.csv` — the script auto-detects `.csv` input.
 
-Written on every run, even one that stops early or crashes (its `status` says
-how far it got). It records when the run started and finished, the query and
-CLI arguments, every UPPER_CASE setting in `config.py` plus a short
-`config_hash` (two runs with the same hash used identical settings), library
-versions, the benchmark used, fund counts after each stage, the latest NAV
-date in the data, and the output files written. Together with
-`excluded_funds.csv` this lets you explain any ranking after the fact.
+## 2. Tune it
 
-## What the pipeline does
+Everything is controlled from `config.py`:
 
-1. **Candidates** — every Direct + Growth fund whose name matches the category
-   (with exclusions, so "mid cap" no longer picks up "Large & Mid Cap").
-   Passive / smart-beta products (index, ETF, Nifty/Sensex, momentum, low-vol,
-   equal-weight) and fund-of-funds are excluded. Dividend Yield *funds* are
-   correctly recognised and not mistaken for dividend-payout plans.
-   **No cap by default** (`MAX_FUNDS_TO_SCAN = None`); a cap, if you set one,
-   takes a seeded random sample rather than an alphabetical prefix.
-2. **Fetch** — parallel (`FETCH_WORKERS`), with retries and backoff.
-3. **Data-quality gate** — drops funds whose AMFI `scheme_category` doesn't match
-   the request, whose latest NAV is more than `MAX_NAV_STALENESS_DAYS` behind the
-   freshest fund (merged / wound-up / broken feed), or that show a single-day NAV
-   move above `NAV_JUMP_THRESHOLD` (data error / unadjusted split).
-4. **Benchmark** — see below.
-5. **Hard filters** — structural (history, volatility) plus category-relative
-   performance cut-offs (default: at/above the category median on 3y and 5y
-   CAGR, 40th percentile on Sortino). `FILTER_MODE` can also be `absolute`
-   (fixed floors) or `both`.
-6. **Score & rank** — weighted composite of robust, winsorized z-scores
-   standardized against the whole eligible category (not just the survivors).
+- **Hard filters** (`MIN_CAGR_1Y/3Y/5Y`, `MAX_VOLATILITY`, `MIN_RISK_RETURN_RATIO`,
+  `MIN_HISTORY_YEARS`): a fund failing any is dropped. Set to `None` to disable.
+- **Score weights** (`SCORE_WEIGHTS`): how much each metric counts. Each metric
+  is z-scored across the surviving funds first. Weights are normalised, so they
+  need not sum to exactly 1.
+- **Benchmark settings** (`BENCHMARK_*`, `BENCHMARKS`): see below.
+- **Portfolio-quality rubric** (`PQ_*`, `HOLDINGS_DIR`, `AMFI_MARKETCAP_CSV`): see below.
+- `RISK_FREE_RATE`, `TOP_N`, `MAX_FUNDS_TO_SCAN`, and the plan-type switches
+  (`REQUIRE_DIRECT_PLAN`, `REQUIRE_GROWTH_PLAN`, `INCLUDE_INDEX_FUNDS`,
+  `INCLUDE_FUND_OF_FUNDS`).
 
-## Common measurement window
+**Missing values:** any metric that can't be computed for a fund (too little
+history, no benchmark, no holdings file) is scored as *average* (z = 0) rather
+than excluding the fund. Nothing is ever estimated to fill a gap.
 
-Volatility, downside deviation, max drawdown, the return leg of the
-Sharpe/Sortino ratios, the rolling-return stats and every benchmark-relative
-metric are measured over the **same trailing window for every fund**
-(`RISK_WINDOW_YEARS`, default 5). Previously they used each fund's full
-history, so a fund that lived through more market cycles was penalized for it.
-A fund without enough history gets `None` for those metrics and is scored
-neutrally on them.
+## How the metrics are computed
 
-## Benchmark-relative metrics
+- **CAGR (1y/3y/5y)**: latest NAV vs the NAV N years ago (nearest trading day).
+  Not enough history → `None`.
+- **Volatility**: annualised std-dev of month-over-month NAV returns (`× √12`).
+- **Risk-return ratio (Sharpe-style)**: `(3y CAGR − risk-free rate) / volatility`.
+- **Sortino ratio**: same, divided by downside deviation instead of volatility.
+- **Rolling 3-year returns**: trailing 3-year CAGR at every month-end; summarised
+  as average, minimum, std-dev and `rolling_positive_pct` (share of windows > 0).
+- **SIP XIRR**: monthly SIP simulated over the trailing `SIP_YEARS`.
+- **Max drawdown**: largest peak-to-trough NAV decline over the fund's history.
 
-Measured on aligned month-end returns over the common window:
+### Benchmark-relative metrics (`benchmark.py`)
 
-- **beta**, **alpha** (annualized Jensen's alpha, using the risk-free rate)
-- **tracking_error** and **information_ratio** (active return per unit of active risk)
-- **up_capture / down_capture** (geometric; lower down-capture is better)
-- **excess_cagr** and **rolling_beat_pct** (share of rolling 3y windows in which the fund beat the benchmark)
+- **`benchmark_excess_return`**: fund CAGR minus benchmark CAGR over the *same*
+  dates (`BENCHMARK_EXCESS_YEARS`, default 3).
+- **`rolling_beat_benchmark_pct`**: share of rolling windows in which the fund's
+  trailing CAGR beat the benchmark's (this is the spec's "rolling consistency").
 
-The benchmark (`BENCHMARK_MODE`, or `--benchmark`):
+Each fund is benchmarked by its own AMFI category (`BENCHMARKS` in `config.py`;
+sectoral/thematic funds have none). Benchmark data, first match wins:
 
-- **`auto`** (default): an index-fund proxy for the category (Nifty 50/100,
-  Midcap 150, Smallcap 250, Nifty 500 ... via `BENCHMARK_NAME_HINTS`, or pinned
-  with `BENCHMARK_SCHEME_CODES`) if it has enough history; otherwise the
-  **category average**. Index funds on newer indices (Midcap 150, Smallcap 250)
-  may not have 5 years of history yet; they are rejected with a printed note
-  rather than silently producing short-window numbers.
-- **`category_average`**: equal-weight average of all eligible funds. Needs no
-  external data. It includes the fund under test, a small self-reference that
-  shrinks as the category grows.
-- **`none`**: skip benchmark metrics; the score is renormalized over the
-  remaining metrics.
+1. a CSV in `data/benchmarks/` named after the category (`small_cap.csv`,
+   `large_and_mid_cap.csv`, …) with columns `date` and `nav` (or `tri`/`close`) —
+   drop real NSE Total Return Index history here for best accuracy;
+2. a scheme code pinned in `BENCHMARKS[...]["scheme_code"]`;
+3. **auto-discovery**: the plain Direct-Growth index fund tracking that index
+   with the longest NAV history (momentum/quality/ETF/Regular-plan variants excluded).
 
-## Scoring
+Option 3 is only a **proxy**: an index fund's NAV runs slightly below the true
+TRI (expense ratio + tracking error), so excess return is overstated by roughly
+that gap. The run prints which proxy was used and every output row records it.
+A benchmark that is missing, stale (`BENCHMARK_MAX_STALENESS_DAYS`) or too short
+leaves the metrics empty.
 
-Default weights (all configurable) are spread across different kinds of
-evidence rather than five near-copies of "recent return":
-3y CAGR 10%, 5y CAGR 15%, Sortino 20%, information ratio 15%, alpha 10%,
-rolling beat % 10%, max drawdown 10%, down-capture 10%. `cagr_1y`,
-`risk_return_ratio`, `sip_xirr`, `rolling_positive_pct` and
-`rolling_above_hurdle_pct` are still computed and shown, just unweighted.
-After scoring, the tool prints a warning if heavily-weighted metrics are
-near-duplicates across the category (rank correlation ≥ 0.85).
+### Portfolio quality (`portfolio_quality.py`)
 
-`rolling_positive_pct` is almost always ~100% for equity funds, so it no longer
-carries weight; `rolling_beat_pct` (vs benchmark) and `rolling_above_hurdle_pct`
-(share of windows above `ROLLING_HURDLE`, default 12%) discriminate better.
+A 0–100 score from the equity holdings in the AMC's monthly portfolio
+disclosure, from five sub-criteria, each mapped linearly between a "worst" and
+a "best" value (`PQ_CRITERIA` in `config.py`):
 
-## How the other metrics are computed
+| Sub-criterion    | Meaning                                              | Better |
+|------------------|------------------------------------------------------|--------|
+| `top10_pct`      | % of NAV in the ten largest equity holdings          | lower  |
+| `n_holdings`     | number of equity holdings                            | higher |
+| `top_sector_pct` | % of NAV in the largest industry                     | lower  |
+| `largemid_pct`   | % of equity in large+mid caps (liquidity proxy)      | higher |
+| `cash_pct`       | cash, TREPS, net receivables as % of NAV             | lower  |
 
-- **CAGR (1y/3y/5y)**: latest NAV vs the NAV N years ago (nearest prior
-  trading day); `None` if the fund lacks that much history.
-- **Volatility**: annualized std of monthly returns (`× √12`) over the window.
-- **Risk-return ratio (Sharpe-style)**: `(window CAGR − risk-free) / volatility`,
-  both over the same window.
-- **Sortino**: `(window CAGR − risk-free) / downside deviation`, where downside
-  deviation uses the *monthly risk-free rate* as the minimum acceptable return
-  so numerator and denominator share one hurdle.
-- **Rolling 3-year returns**: trailing 3y CAGR at each month-end; only windows
-  *ending* inside the common window are used.
-- **SIP XIRR**: simulated monthly SIP over the trailing `SIP_YEARS`.
-- **Max drawdown**: largest peak-to-trough decline inside the window, stored as
-  a *negative* fraction (−0.30 = 30% drawdown); closer to zero is better.
+The score is the weighted average of the sub-criteria that could be measured,
+and is left **missing** if less than `PQ_MIN_COVERAGE` of the weight is
+measurable. It is also left missing for: no matching file, a non-equity scheme
+(fewer than `PQ_MIN_EQUITY_HOLDINGS` equity holdings), weights that don't add
+up to ~100%, or a statement older than `PQ_MAX_AGE_DAYS`. `pq_note` in the CSV
+says why. The thresholds are this toolkit's defaults, **not an industry
+standard** — tune them. Concentrated-by-design funds (focused, sectoral) score
+lower on concentration by construction; compare within a category.
 
-## Forward-looking signals (tilts, not predictions)
+`largemid_pct` needs `data/amfi_market_cap.csv` (columns `isin,category`,
+category = large/mid/small), built from AMFI's half-yearly stock
+categorisation. Without it that criterion is skipped.
 
-No signal reliably predicts future returns; expense ratio is the best-documented
-exception (it is deducted from returns). So these are **off by default**: the
-signal columns are always computed and shown, but they only change the ranking
-with `--forward` (or `FORWARD_TILT_ENABLED = True`). The backward-looking
-`composite_score` is never modified; with the tilt on, ranking uses
-`combined_score = (1 - blend) x composite_score + blend x forward_tilt`
-(blend default 0.20, hard-capped at 0.25) and the output shows `rank_change`
-(positive = moved up) so you can see how much the ranking depends on soft signals.
-
-**1. NAV-derived signals (no extra data)** -- `sharpe_stability` (worst-half Sharpe
-over the common window), `rolling_p10` (10th-percentile rolling return),
-`rolling_dispersion` (p90 - p10; lower is better), `beta_drift` and
-`down_capture_drift` (std of rolling beta / down-capture vs the benchmark; lower =
-steadier style).
-
-**2. Signals from a CSV you maintain** -- mfapi only provides NAV, so run:
+**Where the holdings files come from.** Drop `.xls/.xlsx` (or `.zip` of them)
+anywhere under `data/holdings/`; every sheet that looks like a SEBI-style
+portfolio statement is parsed and matched to funds by scheme name. Debug a
+folder of real files with:
 
 ```bash
-python shortlist.py "mid cap" --make-template     # writes fund_attributes.csv for the category, then exits
+python portfolio_quality.py data/holdings
 ```
 
-Fill `expense_ratio` (percent, 0.72 = 0.72%), `aum_cr`, `aum_cr_12m_ago`,
-`manager_tenure_years`, optional `turnover_pct`, and `as_of` from AMFI / AMC
-factsheets. Re-running the command adds new funds and never overwrites your values.
-Rows older than `FORWARD_DATA_MAX_AGE_DAYS` (90) trigger a warning (or are ignored
-with `FORWARD_IGNORE_STALE`); implausible values (e.g. expense ratio above
-`EXPENSE_RATIO_MAX_PCT`) are rejected. `aum_strain` = (AUM / category median AUM) x
-(1 + positive 12-month AUM growth), and `capacity_flag` marks funds at 2x the
-median in small / mid cap, where capacity matters most.
+Automation per AMC is limited (`amc_registry.py`, `python holdings_fetch.py --list`):
 
-**3. Weighting** -- `FORWARD_WEIGHTS` (inside the tilt) are normalized over the
-signals that have data; missing values score neutrally. A signal is dropped, with
-a warning, if fewer than `FORWARD_MIN_COVERAGE` (50%) of the category has data
-(z-scoring 3 funds out of 40 is meaningless). `FORWARD_BLEND` above the cap is
-clamped with a warning.
+| Mode                 | AMCs | Meaning |
+|----------------------|------|---------|
+| `auto` (3)           | Nippon India, DSP, Baroda BNP Paribas | `holdings_fetch.py` scrapes the page for the file link. **Not tested against live downloads.** |
+| `manual` (12)        | SBI, HDFC, Aditya Birla Sun Life, Axis, Mirae, Tata, Motilal Oswal, LIC, Mahindra Manulife, Samco, Abakkus, JioBlackRock | Official page found, but the file list is script-rendered/filtered; download in a browser and drop the file in `data/holdings/<amc>/` |
+| `manual_unconfirmed` (3) | ICICI Prudential, UTI, Invesco | Candidate page only |
+| `gated` (2)          | Edelweiss, PPFAS | Behind a folio/PAN/citizenship form with restrictions on reuse — deliberately **not** automated |
+| `not_found` (12)     | Kotak, Bandhan, Canara Robeco, Franklin Templeton, HSBC, Quant, Bank of India, WhiteOak, 360 ONE, Groww, Bajaj Finserv, AlphaGrep | No official monthly-portfolio page located |
 
-**4. Category valuation** -- a category-level P/E percentile is identical for every
-fund, so it can't rank funds within a category. Put it in `category_valuation.csv`
-(`category, pe_percentile, as_of`) and it appears as a rich / cheap note in the
-log, manifest and Excel "Run settings" -- useful for deciding how much to allocate
-to a category, never for ranking.
+AMC sites change; if a scraper finds no matching link it says so rather than
+guessing. Funds from AMCs not in this registry (e.g. IDBI, ITI, Union,
+Sundaram, PGIM India) simply have no portfolio score.
+
+## Tests
 
 ```bash
-python shortlist.py "mid cap" --forward                  # let the tilt influence ranking
-python shortlist.py "mid cap" --forward --forward-blend 0.10
-python shortlist.py "mid cap" --no-forward               # force off even if enabled in config
+python test_benchmark.py
+python test_portfolio_quality.py
 ```
 
-**5. Back-test before trusting a weight** -- `python backtest.py "mid cap"`
-(options: `--horizon 1 3 --step-months 3 --window 3`). At each past as-of date it
-truncates every fund's NAV (no look-ahead), computes each NAV-derived signal as it
-would have looked then, and measures the rank correlation (IC) with the realised
-return over the next 1 and 3 years. Plain past performance (3y/5y CAGR, Sortino,
-alpha) is tested as a yardstick: a forward signal that doesn't beat it hasn't earned
-a weight. A signal is "supported" only if mean IC >= 0.10 and IC > 0 on >= 65% of
-dates; results go to `signal_backtest.csv` with suggested weights.
-Honest limits: overlapping horizons make the observations non-independent, a
-10-year-old category yields only a handful of dates, and survivorship bias
-flatters signals that reward past strength. The CSV signals can't be back-tested
-(no dated history); expense ratio is justified by arithmetic, not by this test.
+Both run offline on synthetic data (the portfolio test builds SEBI-style
+workbooks, including fraction-style weights, a zip, stale and malformed files).
+They check the logic; they have **not** been run against real AMC files or the
+live mfapi.in API.
+
+## Mapping to `mutual_fund_scoring_specification.md`
+
+| Spec parameter | Status |
+|---|---|
+| 1. 3-year return | ✅ `cagr_3y` |
+| 2. 5-year return | ✅ `cagr_5y` |
+| 3. Rolling consistency vs benchmark | ✅ `rolling_beat_benchmark_pct` (benchmark = index-fund proxy unless you supply a TRI CSV) |
+| 4. Benchmark excess return | ✅ `benchmark_excess_return` (same caveat) |
+| 5. Risk-adjusted return | ✅ Sharpe-style ratio + Sortino (computed from 3y CAGR and monthly volatility, not a full excess-return series) |
+| 6. Maximum drawdown | ✅ `max_drawdown` |
+| 7. Expense ratio | ⛔ not implemented (excluded on request) |
+| 8. Portfolio quality | ✅ needs holdings files (see above); missing for funds without one |
+
+Not implemented from the spec: percentile scoring (this toolkit z-scores),
+renormalising weights over available metrics with a minimum-coverage flag
+(missing metrics are scored as average instead), an external JSON weights file
+(weights live in `config.py`), and the `ranked_funds.md` / run-log outputs.
 
 ## Notes & caveats
 
-- **Survivorship bias.** The universe is schemes that exist today in the AMFI
-  master. Funds that were merged away or closed (disproportionately weak
-  performers) are invisible, so category-relative statistics and "beats the
-  median" cut-offs are somewhat flattering. Treat percentiles as relative to
-  *surviving* funds.
-- **Overlapping windows.** Monthly rolling 3-year windows overlap ~97%, so
-  `rolling_*` statistics are strongly autocorrelated — read them as a
-  consistency indicator, not as ~60 independent observations.
-- The benchmark is a *proxy* (an index fund's NAV, which carries a small
-  expense-ratio drag, or the category average), not the official TRI.
-- This is a screening tool, not investment advice — always check exit
-  loads, expense ratios, fund manager tenure, portfolio overlap, and your
-  own risk profile before investing.
-- Past returns (which is all this tool measures) don't guarantee future
+- This is a screening tool, not investment advice — check exit loads, expense
+  ratios, fund manager tenure, portfolio overlap and your own risk profile
+  before investing.
+- Past returns (which is mostly what this measures) don't guarantee future
   performance.
-- The mfapi.in service is free/community-run; if it's ever unavailable,
-  cached data under `data/` will still let you re-run `shortlist.py`
-  without `--refresh`.
-
-## Engineering notes
-
-- **Requirements**: Python 3.10+ and pandas 2.2–3.x (see `requirements.txt`).
-  `shortlist.py` checks this at start-up and exits with a clear message instead
-  of failing deep inside a run.
-- **Performance**: NAV downloads run in parallel with retry + backoff; the
-  rolling-return, CAGR-lookup and SIP-date calculations use binary search /
-  vectorised array operations rather than re-filtering the whole NAV table per
-  month, so a full category scan is dominated by the network, not the maths.
-- **Cache safety**: a cached NAV file is trusted only if it parses, is non-empty
-  and its `_meta.csv` exists; otherwise it is re-downloaded. Cached and
-  downloaded data are both de-duplicated and sorted by date.
-- **Logging**: modules log through `logutil` (INFO to the console as plain
-  lines; WARNING/ERROR prefixed). Used as a library, nothing is configured, so
-  importing the modules never touches your own logging setup.
-- **Tests**: `python test_pipeline.py` and `python test_forward_signals.py` (or `pytest`) runs offline against
-  synthetic NAV data: known-answer checks (XIRR, drawdown, beta recovery),
-  equivalence of the vectorised rolling returns with the original loop, edge
-  cases (empty / single-row / NaN / constant NAV never raise), cache-corruption
-  and retry behaviour, and full end-to-end runs with a patched network.
+- mfapi.in is free/community-run; if it's unavailable, cached data under
+  `data/` still lets you re-run `shortlist.py` without `--refresh`.
