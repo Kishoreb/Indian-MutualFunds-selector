@@ -261,8 +261,17 @@ def calculate_sip_xirr(df: pd.DataFrame, years: float, monthly_amount: float = 1
 
 def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
                          sip_years: float = 3.0, sip_monthly_amount: float = 1000.0,
-                         rolling_window_years: float = 3.0) -> dict:
-    """Computes the full metrics dict for one fund's NAV history."""
+                         rolling_window_years: float = 3.0,
+                         align_ratio_window: bool = True) -> dict:
+    """Computes the full metrics dict for one fund's NAV history.
+
+    align_ratio_window (default True): the Sharpe-style and Sortino ratios divide a return by a risk
+    figure, and both must cover the SAME period. The return leg is the 3-year CAGR (falling back to
+    5y, then 1y), so the volatility / downside deviation used in the ratios are measured over that
+    same trailing period (last 36 / 60 / 12 monthly returns). Set it to False to restore the old
+    behaviour, where the risk side covered the fund's whole history (so a fund old enough to contain
+    the 2020 crash was penalised against a younger one). The `volatility` and `downside_deviation`
+    columns always stay whole-history; `ratio_window_years` records the window the ratios used."""
     cagr_1y = calculate_cagr(df, 1)
     cagr_3y = calculate_cagr(df, 3)
     cagr_5y = calculate_cagr(df, 5)
@@ -271,12 +280,27 @@ def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
 
     # Use 3-year CAGR (falling back to 5y, then 1y) as the "return" leg of
     # the risk-adjusted ratios, since it best balances recency and stability.
-    return_for_ratio = cagr_3y if cagr_3y is not None else (cagr_5y if cagr_5y is not None else cagr_1y)
-    risk_return_ratio = calculate_risk_return_ratio(return_for_ratio, volatility, risk_free_rate)
+    if cagr_3y is not None:
+        return_for_ratio, ratio_years = cagr_3y, 3
+    elif cagr_5y is not None:
+        return_for_ratio, ratio_years = cagr_5y, 5
+    else:
+        return_for_ratio, ratio_years = cagr_1y, 1
 
     monthly_returns = calculate_monthly_returns(df)
     downside_dev = calculate_downside_deviation(monthly_returns)
-    sortino_ratio = calculate_sortino_ratio(return_for_ratio, downside_dev, risk_free_rate)
+
+    if align_ratio_window and return_for_ratio is not None:
+        window = monthly_returns.iloc[-(ratio_years * 12):]
+        ratio_vol = float(window.std() * np.sqrt(12)) if len(window) >= 6 else None
+        ratio_dd = calculate_downside_deviation(window)
+        ratio_window_years = float(ratio_years)
+    else:
+        ratio_vol, ratio_dd = volatility, downside_dev
+        ratio_window_years = None   # whole history
+
+    risk_return_ratio = calculate_risk_return_ratio(return_for_ratio, ratio_vol, risk_free_rate)
+    sortino_ratio = calculate_sortino_ratio(return_for_ratio, ratio_dd, risk_free_rate)
 
     rolling_stats = rolling_return_stats(df, window_years=rolling_window_years)
     sip_xirr = calculate_sip_xirr(df, years=sip_years, monthly_amount=sip_monthly_amount)
@@ -290,6 +314,7 @@ def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
         "risk_return_ratio": risk_return_ratio,
         "downside_deviation": downside_dev,
         "sortino_ratio": sortino_ratio,
+        "ratio_window_years": ratio_window_years,
         "rolling_avg": rolling_stats["rolling_avg"],
         "rolling_min": rolling_stats["rolling_min"],
         "rolling_positive_pct": rolling_stats["rolling_positive_pct"],

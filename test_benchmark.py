@@ -166,6 +166,34 @@ ranked = shortlist.score_and_rank(df)
 check("no NaN composite with missing benchmark", ranked["composite_score"].notna().all())
 check("weights sum to 1", abs(sum(config.SCORE_WEIGHTS.values()) - 1.0) < 1e-9)
 
+# data-completeness columns: how much of each score rests on measured data
+w = config.SCORE_WEIGHTS
+wsum = sum(w.values())
+r0 = ranked[ranked.scheme_code == "0"].iloc[0]
+r1 = ranked[ranked.scheme_code == "1"].iloc[0]
+check("coverage: only portfolio quality missing -> 1 minus its weight",
+      abs(r1["score_coverage"] - (1 - w["portfolio_quality"] / wsum)) < 1e-9)
+check("coverage: names the missing metric", r1["score_missing"] == "portfolio_quality")
+miss0 = ["benchmark_excess_return", "rolling_beat_benchmark_pct", "portfolio_quality"]
+check("coverage: benchmark + portfolio missing -> lower coverage",
+      abs(r0["score_coverage"] - (1 - sum(w[m] for m in miss0) / wsum)) < 1e-9)
+check("coverage: lists every missing metric", set(r0["score_missing"].split(", ")) == set(miss0))
+complete = df.copy()
+complete["portfolio_quality"] = 60.0
+complete.loc[0, ["benchmark_excess_return", "rolling_beat_benchmark_pct"]] = 0.1
+rc = shortlist.score_and_rank(complete)
+check("coverage: nothing missing -> 100% and empty list",
+      (abs(rc["score_coverage"] - 1.0) < 1e-9).all() and (rc["score_missing"] == "").all())
+expected_comp = 0
+for m, wt in w.items():
+    v = df[m].astype(float)
+    if m == "max_drawdown":
+        v = -v
+    expected_comp = expected_comp + ((v - v.mean()) / v.std()).fillna(0) * (wt / wsum)
+got_comp = ranked.set_index("scheme_code")["composite_score"]
+check("composite score is unchanged by the coverage columns (independent recomputation)",
+      all(abs(got_comp[str(i)] - expected_comp[i]) < 1e-12 for i in range(len(df))))
+
 # a fund that is strictly better on benchmark metrics only should move up
 base = df.copy()
 base["benchmark_excess_return"] = 0.0
@@ -179,6 +207,7 @@ pos = {row.scheme_code: row.rank for row in r2.itertuples()}
 check("benchmark metrics influence rank (best up, worst down)", pos["3"] < pos["5"])
 
 disp = shortlist.format_for_display(ranked)
+check("display formats score_coverage as %", str(disp.loc[0, "score_coverage"]).endswith("%"))
 check("display formats benchmark cols as %", str(disp.loc[0, "benchmark_excess_return"]).endswith("%") or disp.loc[0, "benchmark_excess_return"] == "N/A")
 
 # excel formatting of new columns

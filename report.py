@@ -3,7 +3,7 @@ report.py
 ---------
 Formats the ranked shortlist as a polished Excel workbook: bold header,
 frozen header row, auto-sized columns, percentage/number formatting, and
-conditional color scale on the composite score so the best funds pop
+a conditional colour scale on the final score so the best funds pop
 visually. Falls back gracefully (prints a warning) if openpyxl isn't
 installed rather than crashing the whole pipeline.
 """
@@ -15,11 +15,19 @@ PERCENT_COLS = {
     "downside_deviation", "rolling_avg", "rolling_min", "rolling_std",
     "rolling_positive_pct", "sip_xirr",
     "benchmark_cagr", "benchmark_excess_return", "rolling_beat_benchmark_pct",
-    "pq_coverage",
+    "pq_coverage", "score_coverage",
+    "downside_capture", "quartile_consistency", "q1_share",
 }
 # portfolio_quality is on a 0-100 scale; the pq_* inputs are already in percent units.
 RATIO_COLS = {"risk_return_ratio", "sortino_ratio", "composite_score", "portfolio_quality",
-              "pq_top10_pct", "pq_top_sector_pct", "pq_largemid_pct", "pq_cash_pct"}
+              "pq_top10_pct", "pq_top_sector_pct", "pq_largemid_pct", "pq_cash_pct",
+              "final_score_0_100"}
+
+
+def _is_points_col(name: str) -> bool:
+    """score_<metric> (0-100 percentile score) and contrib_<metric> (points) columns."""
+    return (name.startswith("contrib_") or name.startswith("score_")) and name not in (
+        "score_coverage", "score_missing")
 
 
 def export_to_excel(df: pd.DataFrame, path: str) -> bool:
@@ -57,14 +65,23 @@ def export_to_excel(df: pd.DataFrame, path: str) -> bool:
             ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 32)
 
             if col_name in PERCENT_COLS:
-                for row_idx in range(2, len(df) + 2):
-                    ws.cell(row=row_idx, column=col_idx).number_format = "0.00%"
+                fmt = "0.00%"
             elif col_name in RATIO_COLS:
+                fmt = "0.00"
+            elif _is_points_col(col_name):
+                fmt = "0.0"
+            else:
+                fmt = None
+            if fmt:
                 for row_idx in range(2, len(df) + 2):
-                    ws.cell(row=row_idx, column=col_idx).number_format = "0.00"
+                    ws.cell(row=row_idx, column=col_idx).number_format = fmt
 
-        if "composite_score" in df.columns:
-            score_col_idx = list(df.columns).index("composite_score") + 1
+        # colour the 0-100 final score when present (it is blank for INSUFFICIENT_DATA funds),
+        # otherwise the composite score
+        score_name = "final_score_0_100" if "final_score_0_100" in df.columns else (
+            "composite_score" if "composite_score" in df.columns else None)
+        if score_name:
+            score_col_idx = list(df.columns).index(score_name) + 1
             letter = get_column_letter(score_col_idx)
             rng = f"{letter}2:{letter}{len(df) + 1}"
             rule = ColorScaleRule(

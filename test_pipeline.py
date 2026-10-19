@@ -1,450 +1,319 @@
-"""
-test_pipeline.py
-----------------
-Offline smoke + unit tests using synthetic NAV data (no network needed).
+"""Offline end-to-end tests for shortlist.py (CLI, multi-category runs, filters, outputs, exit codes) and
+holdings_import.py, with a SIMULATED data layer (no network; the live mfapi.in / AMC sites were not used).
 
-    python test_pipeline.py          # or:  pytest test_pipeline.py
+    python test_pipeline.py
 """
-
 import os
+import shutil
+import sys
 import tempfile
+import types
+import zipfile
+from datetime import datetime, timedelta
 
 import numpy as np
+import openpyxl
 import pandas as pd
 
-import benchmark
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
-import fund_universe
-import metrics
-import shortlist
 
-END = pd.Timestamp("2026-10-09")
+passed = 0
 
 
-# ---------------------------------------------------------------------------
-# Synthetic data helpers
-# ---------------------------------------------------------------------------
-
-def make_nav(daily_returns: np.ndarray, end=END, start_nav=100.0) -> pd.DataFrame:
-    dates = pd.bdate_range(end=end, periods=len(daily_returns) + 1)
-    nav = start_nav * np.concatenate([[1.0], np.cumprod(1 + daily_returns)])
-    return pd.DataFrame({"date": dates, "nav": nav})
+def check(name, cond):
+    global passed
+    assert cond, f"FAIL: {name}"
+    passed += 1
+    print(f"ok  {name}")
 
 
-def bench_returns(n_days, seed=1):
-    rng = np.random.default_rng(seed)
-    return rng.normal(0.0004, 0.010, n_days)
+TODAY = pd.Timestamp(datetime.now().date())
+END = TODAY - pd.Timedelta(days=1)
+DATES = pd.bdate_range(END - pd.Timedelta(days=8 * 365), END)
+
+SMALL = list(range(101, 111))      # 101..110 ranked or flagged below
+MID = list(range(201, 211))
+STALE, FAILS, SPARSE, THIN = 111, 112, 109, 108
 
 
-def fund_returns(bench, beta, alpha_daily, idio, seed):
-    rng = np.random.default_rng(seed)
-    return beta * bench + alpha_daily + rng.normal(0, idio, len(bench))
+def nav_for(code):
+    rng = np.random.default_rng(code)
+    nav = pd.DataFrame({"date": DATES, "nav": 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.01, len(DATES))))})
+    if code == STALE:
+        nav = nav[nav["date"] <= END - pd.Timedelta(days=60)].reset_index(drop=True)
+    nav["code"] = str(code)
+    return nav
 
 
-# ---------------------------------------------------------------------------
-# Unit tests
-# ---------------------------------------------------------------------------
-
-def test_name_and_category_matching():
-    nm = fund_universe.name_matches_category
-    assert nm("mid cap", "Axis Midcap Fund - Direct Plan - Growth")
-    assert nm("mid cap", "Kotak Emerging Equity Mid Cap Fund - Direct - Growth")
-    assert not nm("mid cap", "HDFC Large & Mid Cap Fund - Direct Plan - Growth")
-    assert nm("large & mid cap", "HDFC Large & Mid Cap Fund - Direct Plan - Growth")
-    assert nm("large cap", "ICICI Prudential Bluechip Fund - Direct Plan - Growth")
-    assert not nm("large cap", "Canara Robeco Large and Mid Cap Fund - Direct - Growth")
-
-    cm = fund_universe.category_matches
-    assert cm("mid cap", "Equity Scheme - Mid Cap Fund") is True
-    assert cm("mid cap", "Equity Scheme - Large & Mid Cap Fund") is False
-    assert cm("small cap", "Equity Scheme - Mid Cap Fund") is False
-    assert cm("elss", "Equity Scheme - ELSS") is True
-    assert cm("mid cap", "") is None and cm("mid cap", None) is None
+def fake_metrics(code):
+    rng = np.random.default_rng(int(code) + 1000)
+    m = {"cagr_1y": rng.uniform(.12, .35), "cagr_3y": rng.uniform(.12, .3), "cagr_5y": rng.uniform(.12, .3),
+         "volatility": rng.uniform(.15, .25), "risk_return_ratio": rng.uniform(.6, 1.5),
+         "sortino_ratio": rng.uniform(.8, 2.2), "downside_deviation": .1, "rolling_avg": .15, "rolling_min": .02,
+         "rolling_positive_pct": rng.uniform(.7, 1), "rolling_std": .05, "sip_xirr": rng.uniform(.1, .3),
+         "max_drawdown": -rng.uniform(.2, .5), "history_years": 8.0}
+    if int(code) == FAILS:
+        m["cagr_3y"] = 0.02
+    if int(code) == SPARSE:
+        m["sip_xirr"] = None
+        m["rolling_positive_pct"] = None
+    return m
 
 
-def test_plan_filtering():
-    ok = fund_universe._is_preferred_plan
-    assert ok("Axis Midcap Fund - Direct Plan - Growth")
-    assert not ok("Axis Midcap Fund - Regular Plan - Growth")
-    assert not ok("Axis Midcap Fund - Direct Plan - IDCW")
-    assert not ok("Nifty Midcap 150 Index Fund - Direct Plan - Growth")
-    assert not ok("Motilal Oswal Midcap 100 ETF Direct Growth")
-    assert not ok("Axis Nifty Midcap 50 Momentum Direct Growth")
-    # Dividend Yield is a CATEGORY and must not be mistaken for a payout option
-    assert ok("Templeton India Equity Income / Dividend Yield Fund - Direct Plan - Growth")
-    assert not ok("Templeton Dividend Yield Fund - Direct Plan - Dividend Payout")
+# ---------------------------------------------------------------- simulated data layer
+fu = types.ModuleType("fund_universe")
+CATS = {"small cap": SMALL + [101, STALE, FAILS], "mid cap": MID}      # 101 listed twice
 
 
-def test_drawdown_sign_and_ranking_direction():
-    # V-shaped NAV: 100 -> 60 -> 100: drawdown is -40%
-    dates = pd.bdate_range(end=END, periods=7 * 260)
-    nav = np.concatenate([np.linspace(100, 120, 3 * 260), np.linspace(120, 72, 260), np.linspace(72, 130, 3 * 260 - 0)])
-    nav = nav[:len(dates)]
-    df = pd.DataFrame({"date": dates[:len(nav)], "nav": nav})
-    dd = metrics.calculate_max_drawdown(df)
-    assert dd is not None and dd < 0 and abs(dd - (-0.4)) < 0.01
-
-    # With ONLY max_drawdown weighted, the shallower-drawdown fund must rank first.
-    saved = dict(config.SCORE_WEIGHTS)
-    try:
-        config.SCORE_WEIGHTS = {"max_drawdown": 1.0}
-        universe = pd.DataFrame({
-            "scheme_code": list("abcdefghij"),
-            "max_drawdown": [-0.10, -0.15, -0.20, -0.25, -0.30, -0.35, -0.40, -0.45, -0.50, -0.55],
-        })
-        ranked = shortlist.score_and_rank(universe, universe)
-        assert ranked.loc[0, "scheme_code"] == "a", ranked[["scheme_code", "max_drawdown"]]
-        assert ranked.loc[ranked.index[-1], "scheme_code"] == "j"
-    finally:
-        config.SCORE_WEIGHTS = saved
+def find_candidates(cat, force_refresh=False):
+    key = cat.strip().lower()
+    if key == "nothing":
+        return "large cap", []
+    if key not in CATS:
+        raise ValueError(f"Unrecognized category '{cat}'.")
+    return key, [{"scheme_code": str(c), "scheme_name_hint": f"Fund {c} {key.title()} - Direct Plan - Growth"} for c in CATS[key]]
 
 
-def test_sortino_mar_uses_risk_free():
-    # Monthly returns positive but always BELOW the monthly risk-free rate.
-    rf_m = metrics.monthly_rate(0.065)
-    r = pd.Series([rf_m * 0.5] * 24)
-    assert metrics.calculate_downside_deviation(r, mar=0.0) == 0.0     # old behaviour hid the shortfall
-    assert metrics.calculate_downside_deviation(r, mar=rf_m) > 0       # new behaviour sees it
+fu.find_candidates = find_candidates
+fu.supported_categories = lambda: ["mid cap", "small cap"]
+fn = types.ModuleType("fetch_nav_data")
+fn.get_nav_history = lambda code, force_refresh=False: nav_for(int(code))
+fn.get_scheme_meta = lambda code: {"scheme_name": f"Fund {code}", "fund_house": "Test Mutual Fund",
+                                   "scheme_category": "Equity Scheme - Small Cap Fund" if int(code) < 200 else "Equity Scheme - Mid Cap Fund"}
+mt = types.ModuleType("metrics")
+mt.compute_all_metrics = lambda nav, *a, **k: fake_metrics(nav["code"].iloc[0])
+
+bm = types.ModuleType("benchmark")
+BENCH_NAV = pd.DataFrame({"date": DATES, "nav": 100 * np.exp(np.cumsum(np.random.default_rng(7).normal(0.0004, 0.01, len(DATES))))})
 
 
-def test_xirr_known_answer():
-    t0 = pd.Timestamp("2024-01-01")
-    x = metrics._xirr([(t0, -100.0), (t0 + pd.Timedelta(days=365), 110.0)])
-    assert abs(x - 0.10) < 1e-3
+def _month_end_nav(df):
+    return df.set_index("date")["nav"].sort_index().resample("ME").last().dropna()
 
 
-def test_common_window_and_short_history():
-    b = bench_returns(260 * 3)  # 3y of history only
-    short = make_nav(fund_returns(b, 1.0, 0.0002, 0.004, 5))
-    assert metrics.calculate_volatility(short, window_years=5.0) is None      # not covered -> None, not "whatever we have"
-    assert metrics.calculate_max_drawdown(short, window_years=5.0) is None
-    assert metrics.calculate_volatility(short) is not None                    # full-history call still works
-
-    long_ = make_nav(fund_returns(bench_returns(260 * 9), 1.0, 0.0002, 0.004, 6))
-    v5 = metrics.calculate_volatility(long_, window_years=5.0)
-    vall = metrics.calculate_volatility(long_)
-    assert v5 is not None and vall is not None
-
-
-def test_nav_anomaly_detection():
-    r = bench_returns(1500)
-    clean = make_nav(r)
-    assert metrics.detect_nav_anomalies(clean, 0.20)[0] == 0
-    r2 = r.copy()
-    r2[700] = 0.45  # 45% one-day jump
-    n, mx = metrics.detect_nav_anomalies(make_nav(r2), 0.20)
-    assert n == 1 and mx > 0.4
-
-
-def test_benchmark_stats_recover_known_beta():
-    n = 260 * 9
-    b = bench_returns(n, seed=11)
-    bench = make_nav(b)
-    levered = make_nav(fund_returns(b, 1.2, 0.0003, 0.002, 12))
-    stats = metrics.calculate_benchmark_stats(levered, bench, 0.065, window_years=5.0)
-    assert stats["beta"] is not None and 1.1 < stats["beta"] < 1.3, stats
-    assert stats["alpha"] is not None and stats["alpha"] > 0, stats           # built-in positive alpha
-    assert stats["information_ratio"] is not None
-    assert stats["rolling_beat_pct"] is not None
-
-    twin = metrics.calculate_benchmark_stats(make_nav(b), bench, 0.065, window_years=5.0)
-    assert abs(twin["beta"] - 1.0) < 1e-6 and abs(twin["alpha"]) < 1e-6
-    assert abs(twin["up_capture"] - 1.0) < 1e-6 and abs(twin["down_capture"] - 1.0) < 1e-6
-
-    # a benchmark with too little overlap yields all-None
-    tiny = make_nav(bench_returns(260 * 2, seed=3))
-    s2 = metrics.calculate_benchmark_stats(levered, tiny, 0.065, window_years=5.0)
-    assert s2["beta"] is None and s2["alpha"] is None
-
-
-def test_category_average_benchmark():
-    navs = {str(i): make_nav(fund_returns(bench_returns(260 * 8, 20), 1.0, 0.0001 * i, 0.003, 30 + i))
-            for i in range(8)}
-    avg = benchmark.build_category_average(navs)
-    assert avg is not None and metrics.years_of_history(avg) > 7
-    # the average fund should have beta ~1 against the average
-    stats = metrics.calculate_benchmark_stats(navs["3"], avg, 0.065, window_years=5.0)
-    assert 0.8 < stats["beta"] < 1.2
-
-
-def test_percentile_scoring_is_robust_to_outlier():
-    # one absurd outlier must not flatten everyone else (winsorized z / percentiles)
-    saved = dict(config.SCORE_WEIGHTS)
-    try:
-        config.SCORE_WEIGHTS = {"cagr_5y": 1.0}
-        vals = [0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20, 5.0]
-        u = pd.DataFrame({"scheme_code": list("abcdefghij"), "cagr_5y": vals})
-        ranked = shortlist.score_and_rank(u, u)
-        assert ranked.loc[0, "scheme_code"] == "j"
-        gap = ranked["composite_score"].iloc[1] - ranked["composite_score"].iloc[2]
-        assert gap > 0.05, "winsorizing should keep the non-outliers distinguishable"
-    finally:
-        config.SCORE_WEIGHTS = saved
-
-
-# ---------------------------------------------------------------------------
-# Edge cases, caching, retries, manifest
-# ---------------------------------------------------------------------------
-
-def test_edge_cases_never_raise():
-    empty = pd.DataFrame({"date": pd.to_datetime([]), "nav": []})
-    tiny = make_nav(np.array([0.01, -0.01, 0.02]))
-    flat = make_nav(np.zeros(260 * 7))                       # zero volatility
-    with_zero_nav = make_nav(bench_returns(260 * 7)); with_zero_nav.loc[5, "nav"] = 0.0
-    for df in (empty, tiny, flat, with_zero_nav):
-        if df.empty:
-            assert metrics.calculate_cagr(df, 3) is None
-            assert metrics.calculate_max_drawdown(df) is None
-            assert metrics.calculate_sip_xirr(df, 3) is None
+def _rolling_cagr(monthly, window_years):
+    window = pd.Timedelta(days=int(window_years * 365.25))
+    idx, out = monthly.index, {}
+    for end_date, end_nav in monthly.items():
+        start_date = end_date - window
+        pos = idx.searchsorted(start_date, side="right") - 1
+        if pos < 0 or start_date - idx[pos] > pd.Timedelta(days=45):
             continue
-        out = metrics.compute_all_metrics(df, 0.065)
-        assert "cagr_3y" in out and "last_nav_date" in out
-    out = metrics.compute_all_metrics(flat, 0.065)
-    assert out["risk_return_ratio"] is None                      # zero volatility -> undefined, not inf/NaN
-    # a flat fund earns 0% < risk-free, so Sortino IS defined (and negative) because the hurdle is the risk-free rate
-    assert out["sortino_ratio"] is not None and out["sortino_ratio"] < 0
-    out_tiny = metrics.compute_all_metrics(tiny, 0.065)
-    assert out_tiny["cagr_5y"] is None and out_tiny["volatility"] is None and out_tiny["rolling_avg"] is None
-
-
-def test_unsorted_input_is_handled():
-    df = make_nav(bench_returns(260 * 7, seed=9))
-    shuffled = df.sample(frac=1.0, random_state=1).reset_index(drop=True)
-    a = metrics.compute_all_metrics(df, 0.065)
-    b = metrics.compute_all_metrics(shuffled, 0.065)
-    for k in ("cagr_1y", "cagr_3y", "cagr_5y", "volatility", "max_drawdown", "sortino_ratio"):
-        assert a[k] == b[k], k
-
-
-def _reference_rolling(df, window_years=3.0):
-    """The original O(n^2) loop, kept here to prove the vectorized version is equivalent."""
-    monthly_nav = df.set_index("date")["nav"].resample("ME").last().dropna()
-    window_days = int(window_years * 365.25)
-    values = {}
-    for end_date, end_nav in monthly_nav.items():
-        start_date = end_date - pd.Timedelta(days=window_days)
-        prior = monthly_nav[monthly_nav.index <= start_date]
-        if prior.empty or start_date - prior.index[-1] > pd.Timedelta(days=45):
-            continue
-        start_nav = prior.iloc[-1]
+        start_nav = monthly.iloc[pos]
         if start_nav <= 0:
             continue
-        values[end_date] = (end_nav / start_nav) ** (1 / window_years) - 1
-    return pd.Series(values, dtype=float)
+        out[end_date] = (end_nav / start_nav) ** (1 / window_years) - 1
+    return pd.Series(out, dtype=float)
 
 
-def test_vectorized_rolling_matches_reference():
-    for years, seed in ((9, 1), (4, 2), (3.2, 3)):
-        df = make_nav(bench_returns(int(260 * years), seed=seed))
-        ref, new = _reference_rolling(df), metrics.calculate_rolling_returns(df)
-        assert ref.index.equals(new.index) and np.allclose(ref.values, new.values), years
+def category_key(cat, fallback=None):
+    t = (cat or "").lower()
+    return "small cap" if "small cap" in t else "mid cap" if "mid cap" in t else fallback
 
 
-def test_nav_on_or_before_binary_search():
-    df = make_nav(bench_returns(500, seed=4))
-    for d in pd.date_range(df["date"].min() - pd.Timedelta(days=10), df["date"].max() + pd.Timedelta(days=10), freq="13D"):
-        sub = df[df["date"] <= d]
-        exp = None if sub.empty else float(sub.iloc[-1]["nav"])
-        got = metrics._nav_on_or_before(df, d)
-        assert (exp is None and got is None) or exp == got
+class Provider:
+    def __init__(self, force_refresh=False): pass
+    def get(self, key):
+        return {"label": "Test TRI", "df": BENCH_NAV, "source": "test", "proxy_name": "proxy", "proxy_code": "0"} if key else None
+    def describe(self):
+        return ["  small cap: Test TRI via test [proxy] (8.0y history)"]
 
 
-class _FakeResp:
-    def __init__(self, payload, status=200):
-        self._p, self.status_code = payload, status
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            import requests
-            raise requests.HTTPError(f"HTTP {self.status_code}")
-
-    def json(self):
-        return self._p
+def metrics_for_fund(df, provider, cat, default):
+    code = int(df["code"].iloc[0])
+    rng = np.random.default_rng(code + 5)
+    none = code in (THIN, SPARSE)
+    return {"benchmark_name": "Test TRI", "benchmark_proxy": "proxy", "benchmark_cagr": 0.12,
+            "benchmark_excess_return": None if none else rng.uniform(-.02, .05),
+            "rolling_beat_benchmark_pct": None if none else rng.uniform(.3, .9), "benchmark_windows": 30}
 
 
-def _payload(n=30, category="Equity Scheme - Mid Cap Fund"):
-    dates = pd.bdate_range(end=END, periods=n)
-    return {"meta": {"scheme_name": "Fake Fund", "fund_house": "FakeAMC", "scheme_category": category},
-            "data": [{"date": d.strftime("%d-%m-%Y"), "nav": f"{100 + i:.4f}"} for i, d in enumerate(dates)]}
+bm._month_end_nav, bm._rolling_cagr, bm.category_key = _month_end_nav, _rolling_cagr, category_key
+bm.BenchmarkProvider, bm.metrics_for_fund = Provider, metrics_for_fund
+bm.EMPTY_BENCHMARK_METRICS = {}
+
+pqm = types.ModuleType("portfolio_quality")
+pqm.EXCEL_EXT = (".xls", ".xlsx", ".xlsm")
+pqm.EMPTY_FIELDS = {"portfolio_quality": None, "pq_coverage": None, "pq_top10_pct": None, "pq_holdings": None,
+                    "pq_top_sector_pct": None, "pq_largemid_pct": None, "pq_cash_pct": None,
+                    "pq_as_of": "", "pq_source": "", "pq_note": "no holdings file matched this scheme"}
 
 
-def test_fetch_retries_and_cache_robustness():
-    import requests
-    import fetch_nav_data as fnd
-    saved = (config.DATA_DIR, config.FETCH_BACKOFF_SECONDS, config.FETCH_RETRIES, requests.get)
-    with tempfile.TemporaryDirectory() as tmp:
-        config.DATA_DIR, config.FETCH_BACKOFF_SECONDS, config.FETCH_RETRIES = tmp, 0.0, 3
-        calls = {"n": 0}
-
-        def flaky(url, timeout=20):
-            calls["n"] += 1
-            if calls["n"] < 3:
-                raise requests.ConnectionError("boom")
-            return _FakeResp(_payload())
-        try:
-            requests.get = flaky
-            df = fnd.get_nav_history("111", force_refresh=True)
-            assert calls["n"] == 3 and len(df) == 30                       # two failures, third attempt succeeded
-            assert fnd.get_scheme_meta("111")["scheme_category"] == "Equity Scheme - Mid Cap Fund"
-
-            # fresh cache is used without any network call
-            requests.get = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network should not be hit"))
-            assert len(fnd.get_nav_history("111")) == 30
-
-            # corrupt cache -> transparently re-downloaded
-            with open(os.path.join(tmp, "111.csv"), "w") as f:
-                f.write("this,is\nnot,a,nav,file\n\x00\x00")
-            requests.get = lambda url, timeout=20: _FakeResp(_payload())
-            assert len(fnd.get_nav_history("111")) == 30
-
-            # missing meta file -> re-downloaded (category verification needs it)
-            os.remove(os.path.join(tmp, "111_meta.csv"))
-            hits = {"n": 0}
-            def counting(url, timeout=20):
-                hits["n"] += 1
-                return _FakeResp(_payload())
-            requests.get = counting
-            fnd.get_nav_history("111")
-            assert hits["n"] == 1 and os.path.exists(os.path.join(tmp, "111_meta.csv"))
-
-            # parallel fetch: one good, one hard failure -> failure skipped, not fatal
-            def sometimes(url, timeout=20):
-                if url.endswith("/222"):
-                    return _FakeResp({}, status=404)
-                return _FakeResp(_payload())
-            requests.get = sometimes
-            res = fnd.fetch_many(["333", "222"], force_refresh=True, workers=2)
-            assert list(res) == ["333"]
-        finally:
-            config.DATA_DIR, config.FETCH_BACKOFF_SECONDS, config.FETCH_RETRIES, requests.get = saved
+class PQIndex:
+    files_read, entries, warnings, root = 0, [], [], "data/holdings"
 
 
-def test_manifest_written_with_config_snapshot():
-    import json
-    import manifest
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "m.json")
-        m = manifest.write_manifest(path, {"started_utc": "2026-10-10T00:00:00+00:00", "status": "ok",
-                                           "query": "mid cap", "benchmark": "X", "counts": {"candidates": 3}})
-        on_disk = json.load(open(path))
-        assert on_disk["config"]["RISK_WINDOW_YEARS"] == config.RISK_WINDOW_YEARS
-        assert on_disk["config_hash"] == m["config_hash"] and len(m["config_hash"]) == 12
-        assert on_disk["environment"]["pandas"] == pd.__version__ and on_disk["status"] == "ok"
+pqm.PortfolioIndex = PQIndex
+pqm.fields_for_fund = lambda idx, name: dict(pqm.EMPTY_FIELDS)
+
+hf = types.ModuleType("holdings_fetch")
+hf.fetch_all = lambda *a, **k: None
+rp = types.ModuleType("report")
 
 
-# ---------------------------------------------------------------------------
-# End-to-end (everything patched offline)
-# ---------------------------------------------------------------------------
-
-def _run_end_to_end(benchmark_arg=None, extra_args=()):
-    n = 260 * 9
-    b = bench_returns(n, seed=101)
-
-    funds = {}   # code -> (name, category, df)
-
-    def add(code, name, cat, df):
-        funds[code] = (name, cat, df)
-
-    # 14 healthy mid cap funds with varying alpha/beta/noise
-    for i in range(14):
-        add(f"M{i:02d}", f"AMC{i:02d} Midcap Fund - Direct Plan - Growth", "Equity Scheme - Mid Cap Fund",
-            make_nav(fund_returns(b, 0.9 + 0.03 * i, 0.00005 * (i - 5), 0.003 + 0.0003 * (i % 4), 200 + i)))
-    # defects the pipeline must catch
-    add("STALE", "Stale Midcap Fund - Direct Plan - Growth", "Equity Scheme - Mid Cap Fund",
-        make_nav(fund_returns(b, 1.0, 0.0002, 0.003, 301), end=END - pd.Timedelta(days=90)))
-    r_jump = fund_returns(b, 1.0, 0.0002, 0.003, 302)
-    r_jump[1200] = 0.40
-    add("JUMP", "Jumpy Midcap Fund - Direct Plan - Growth", "Equity Scheme - Mid Cap Fund", make_nav(r_jump))
-    add("WRONG", "Wrong Midcap Fund - Direct Plan - Growth", "Equity Scheme - Large & Mid Cap Fund",
-        make_nav(fund_returns(b, 1.0, 0.0002, 0.003, 303)))
-    add("SHORT", "Short Midcap Fund - Direct Plan - Growth", "Equity Scheme - Mid Cap Fund",
-        make_nav(fund_returns(b[-260 * 3:], 1.0, 0.0002, 0.003, 304)))
-    # index proxies: one too short (4y) and one long enough
-    add("IDXSHORT", "Test Nifty Midcap 150 Index Fund - Direct Plan - Growth", "Other Scheme - Index Funds",
-        make_nav(b[-260 * 4:]))
-    add("IDXLONG", "Test Nifty 500 Index Fund - Direct Plan - Growth", "Other Scheme - Index Funds",
-        make_nav(b))
-
-    scheme_master = [{"schemeCode": c, "schemeName": v[0]} for c, v in funds.items()]
-    # noise entries that must be filtered out by name rules
-    scheme_master += [
-        {"schemeCode": "X1", "schemeName": "Regular Midcap Fund - Regular Plan - Growth"},
-        {"schemeCode": "X2", "schemeName": "AMC Midcap Fund - Direct Plan - IDCW"},
-    ]
-
-    meta = {c: {"scheme_name": v[0], "fund_house": "TestAMC", "scheme_category": v[1]} for c, v in funds.items()}
-
-    # --- patch the network-facing pieces ---
-    fund_universe.download_scheme_master = lambda force_refresh=False: scheme_master
-    nav_lookup = lambda code, force_refresh=False: funds[str(code)][2]
-    shortlist.fetch_many = lambda codes, force_refresh=False, workers=None: {
-        c: funds[c][2] for c in codes if c in funds}
-    shortlist.get_scheme_meta = lambda code: meta.get(str(code), {"scheme_name": "", "fund_house": "", "scheme_category": ""})
-    benchmark.get_nav_history = nav_lookup
-    benchmark.get_scheme_meta = shortlist.get_scheme_meta
-
-    argv = ["mid cap"] + (["--benchmark", benchmark_arg] if benchmark_arg else []) + list(extra_args)
-    shortlist.main(argv)
+def fake_export(df, path):
+    df.to_excel(path, index=False)
+    return True
 
 
-def test_end_to_end_auto_benchmark():
-    saved_cwd = os.getcwd()
-    saved_hints = dict(config.BENCHMARK_NAME_HINTS)
-    with tempfile.TemporaryDirectory() as tmp:
-        os.chdir(tmp)
-        try:
-            # point "mid cap" at the two synthetic proxies: short midcap150 first, then nifty 500
-            config.BENCHMARK_NAME_HINTS["mid cap"] = [["nifty midcap 150 index"], ["nifty 500 index"]]
-            _run_end_to_end()
-
-            ranked = pd.read_csv(config.OUTPUT_CSV)
-            excluded = pd.read_csv(config.EXCLUDED_CSV)
-            exmap = dict(zip(excluded["scheme_code"], excluded["reasons"]))
-
-            assert "STALE" in exmap and "stale NAV" in exmap["STALE"]
-            assert "JUMP" in exmap and "suspicious NAV jump" in exmap["JUMP"]
-            assert "WRONG" in exmap and "AMFI category" in exmap["WRONG"]
-            assert "SHORT" in exmap  # insufficient history
-            assert not set(ranked["scheme_code"]) & {"STALE", "JUMP", "WRONG", "SHORT", "IDXSHORT", "IDXLONG", "X1", "X2"}
-            assert len(ranked) >= 3
-            # benchmark metrics populated (4y midcap150 rejected -> long Nifty 500 proxy was NOT tried
-            # for this hint list order, so it falls to the second hint set)
-            assert ranked["alpha"].notna().all() and ranked["information_ratio"].notna().all()
-            assert ranked["composite_score"].is_monotonic_decreasing
-            # the 4y Midcap-150 proxy is too short, so the walk must continue to the Nifty 500 proxy
-            label, bdf, note = benchmark.resolve_benchmark("mid cap", {})
-            assert note == "index proxy" and "Nifty 500" in label, (label, note)
-            assert os.path.exists(config.OUTPUT_XLSX)
-            import json
-            mf = json.load(open(config.MANIFEST_JSON))
-            assert mf["status"] == "ok" and mf["category"] == "mid cap"
-            assert mf["counts"]["candidates"] == 18 and mf["counts"]["passed_data_quality"] == 15
-            assert "Nifty 500" in mf["benchmark"] and mf["latest_nav_date"] == "2026-10-09"
-        finally:
-            config.BENCHMARK_NAME_HINTS.clear()
-            config.BENCHMARK_NAME_HINTS.update(saved_hints)
-            os.chdir(saved_cwd)
+rp.export_to_excel = fake_export
+reg = types.ModuleType("amc_registry")
+reg.AMCS = [{"key": "axis", "aliases": ["axis"], "mode": "manual"}, {"key": "nippon_india", "aliases": ["nippon"], "mode": "auto"}]
 
 
-def test_end_to_end_category_average_and_none():
-    saved_cwd = os.getcwd()
-    with tempfile.TemporaryDirectory() as tmp:
-        os.chdir(tmp)
-        try:
-            _run_end_to_end("category")
-            r1 = pd.read_csv(config.OUTPUT_CSV)
-            assert r1["alpha"].notna().all()
-            _run_end_to_end("none")
-            r2 = pd.read_csv(config.OUTPUT_CSV)
-            assert r2["alpha"].isna().all()       # benchmark skipped
-            assert len(r2) >= 3                   # still ranks on the non-benchmark metrics
-        finally:
-            os.chdir(saved_cwd)
+def amc_for(text):
+    t = (text or "").lower()
+    best, n = None, 0
+    for a in reg.AMCS:
+        for al in a["aliases"]:
+            if al in t and len(al) > n:
+                best, n = a, len(al)
+    return best
 
 
-if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
-    for t in tests:
-        t()
-        print(f"PASS  {t.__name__}")
-    print(f"\nAll {len(tests)} tests passed.")
+reg.amc_for_fund_house = amc_for
+sys.modules.update(fund_universe=fu, fetch_nav_data=fn, metrics=mt, benchmark=bm, portfolio_quality=pqm,
+                   holdings_fetch=hf, report=rp, amc_registry=reg)
+
+import shortlist
+import holdings_import
+
+work = tempfile.mkdtemp()
+config.FUND_ATTRIBUTES_CSV = os.path.join(work, "none.csv")
+config.EXPORT_EXCEL = True
+
+
+def run(argv):
+    return shortlist.main(argv)
+
+
+# ---------------------------------------------------------------- one category
+out1 = os.path.join(work, "one")
+code = run(["small cap", "--output-dir", out1])
+check("single category run exits 0", code == 0)
+for f in ("shortlisted_funds.csv", "shortlisted_funds.xlsx", "ranked_funds.md", "run_log.txt"):
+    check(f"output written: {f}", os.path.exists(os.path.join(out1, f)))
+r1 = pd.read_csv(os.path.join(out1, "shortlisted_funds.csv"), dtype={"scheme_code": str})
+check("duplicate scheme code collapsed to one row", (r1["scheme_code"] == "101").sum() == 1)
+check("stale fund excluded", "111" not in r1["scheme_code"].tolist())
+check("fund failing the hard filter excluded", "112" not in r1["scheme_code"].tolist())
+check("ranks run 1..n among the ranked funds", sorted(r1.loc[r1["status"] == "RANKED", "rank"].astype(int)) ==
+      list(range(1, int((r1["status"] == "RANKED").sum()) + 1)))
+check("fund with most metrics missing is INSUFFICIENT_DATA with no rank",
+      r1.set_index("scheme_code").loc["109", "status"] == "INSUFFICIENT_DATA" and pd.isna(r1.set_index("scheme_code").loc["109", "rank"]))
+check("fund missing only benchmark metrics is still ranked on renormalised weights",
+      r1.set_index("scheme_code").loc["108", "status"] == "RANKED" and abs(r1.set_index("scheme_code").loc["108", "score_coverage"] - 0.7) < 1e-6)
+check("final scores are within 0..100", r1["final_score_0_100"].dropna().between(0, 100).all())
+check("per-metric score and points columns are in the csv", "score_cagr_3y" in r1.columns and "contrib_max_drawdown" in r1.columns)
+check("new metrics are computed and written", r1["downside_capture"].notna().any() and r1["quartile_consistency"].notna().any())
+check("as-of / data flags columns exist", "last_nav_date" in r1.columns and "data_flags" in r1.columns)
+log1 = open(os.path.join(out1, "run_log.txt")).read()
+check("run log names the weights file and version", "weights.ini" in log1 and "version 2" in log1)
+check("run log lists the stale-fund exclusion", "stale fund" in log1.lower())
+check("run log lists hard-filter exclusions", "112" in log1)
+md1 = open(os.path.join(out1, "ranked_funds.md"), encoding="utf-8").read()
+check("markdown has method, weights, ranking and disclaimer", all(k in md1 for k in
+      ("## Method", "### Weights", "## small cap", "not investment advice", "past returns do not guarantee")))
+check("markdown shows raw value, score, weight and points for top funds",
+      "| Metric | Value | Score 0-100 | Weight % | Effective weight % | Points |" in md1)
+check("markdown states expense ratio is not scored", "Expense ratio is deliberately not scored" in md1)
+check("markdown lists the not-ranked fund", "INSUFFICIENT_DATA" in md1)
+check("low confidence is NOT flagged with 8+ ranked funds", "**LOW CONFIDENCE:**" not in md1)
+check("single category -> no exploratory list", not os.path.exists(os.path.join(out1, "shortlisted_exploratory.csv")))
+
+# ---------------------------------------------------------------- reproducibility
+out1b = os.path.join(work, "one_b")
+run(["small cap", "--output-dir", out1b])
+a = pd.read_csv(os.path.join(out1, "shortlisted_funds.csv"))
+b = pd.read_csv(os.path.join(out1b, "shortlisted_funds.csv"))
+pd.testing.assert_frame_equal(a, b)
+check("identical inputs give identical csv output", True)
+
+# ---------------------------------------------------------------- several categories + exploratory
+out2 = os.path.join(work, "two")
+check("two --category options exit 0", run(["--category", "small cap", "--category", "mid cap", "--output-dir", out2]) == 0)
+r2 = pd.read_csv(os.path.join(out2, "shortlisted_funds.csv"), dtype={"scheme_code": str})
+check("both categories present with a group column", set(r2["group"]) == {"small cap", "mid cap"})
+check("each category is ranked separately (rank 1 appears in both)",
+      all((r2[(r2["group"] == g) & (r2["rank"] == 1)].shape[0] == 1) for g in ("small cap", "mid cap")))
+check("exploratory cross-category csv written", os.path.exists(os.path.join(out2, "shortlisted_exploratory.csv")))
+md2 = open(os.path.join(out2, "ranked_funds.md"), encoding="utf-8").read()
+check("exploratory list is labelled exploratory in the report", "EXPLORATORY cross-category list" in md2 and "Exploratory only" in md2)
+ex = pd.read_csv(os.path.join(out2, "shortlisted_exploratory.csv"))
+check("exploratory list ranks funds from both categories together", ex["group"].iloc[0] == "EXPLORATORY cross-category" and len(ex) > len(r2[r2["group"] == "mid cap"]))
+out3 = os.path.join(work, "all")
+check("--all-categories exits 0", run(["--all-categories", "--output-dir", out3]) == 0)
+
+# ---------------------------------------------------------------- weights file option and low confidence
+alt = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.ini")).read() \
+    .replace("min_group_size = 8", "min_group_size = 50").replace("scoring_method = zscore", "scoring_method = percentile") \
+    .replace("cagr_1y                    = 5", "cagr_1y = 0").replace("downside_capture           = 0", "downside_capture = 5")
+alt_path = os.path.join(work, "alt.ini")
+open(alt_path, "w").write(alt)
+out4 = os.path.join(work, "alt")
+check("--weights with another file works", run(["small cap", "--weights", alt_path, "--output-dir", out4]) == 0)
+r4 = pd.read_csv(os.path.join(out4, "shortlisted_funds.csv"))
+check("the new weights are used (downside capture now scored)", "score_downside_capture" in r4.columns and "score_cagr_1y" not in r4.columns)
+check("small groups are flagged LOW CONFIDENCE", "**LOW CONFIDENCE:**" in open(os.path.join(out4, "ranked_funds.md"), encoding="utf-8").read())
+config.apply_weights(os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.ini"))
+
+# ---------------------------------------------------------------- optional filters
+config.FUND_ATTRIBUTES_CSV = os.path.join(work, "attrs.csv")
+pd.DataFrame({"scheme_code": [str(c) for c in SMALL], "aum_cr": [900] * 5 + [100] * 5}).to_csv(config.FUND_ATTRIBUTES_CSV, index=False)
+config.MIN_AUM_CR = 500
+out5 = os.path.join(work, "attr")
+run(["small cap", "--output-dir", out5])
+r5 = pd.read_csv(os.path.join(out5, "shortlisted_funds.csv"), dtype={"scheme_code": str})
+check("optional AUM filter drops funds below the minimum", not set(r5["scheme_code"]) & {"106", "107", "108", "109", "110"})
+config.MIN_AUM_CR = None
+config.FUND_ATTRIBUTES_CSV = os.path.join(work, "none.csv")
+
+# ---------------------------------------------------------------- exit codes
+check("no arguments -> exit 2", run([]) == 2)
+bad = os.path.join(work, "bad.ini")
+open(bad, "w").write(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.ini")).read().replace("cagr_3y                    = 15", "cagr_3y = 99"))
+check("invalid weights file -> exit 2", run(["small cap", "--weights", bad, "--output-dir", work]) == 2)
+check("missing weights file -> exit 2", run(["small cap", "--weights", "/no/file.ini"]) == 2)
+check("unknown category -> exit 2", run(["banana", "--output-dir", work]) == 2)
+check("no candidate funds -> exit 1", run(["nothing", "--output-dir", os.path.join(work, "empty")]) == 1)
+check("bad --as-of-date -> exit 2", run(["small cap", "--as-of-date", "nonsense"]) == 2)
+check("missing csv input -> exit 2", run(["nope.csv"]) == 2)
+csv_in = os.path.join(work, "mine.csv")
+pd.DataFrame({"scheme_code": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110]}).to_csv(csv_in, index=False)
+check("csv of scheme codes works", run([csv_in, "--output-dir", os.path.join(work, "csv")]) == 0)
+check("the config weights are restored after --weights runs", config.WEIGHTS_VERSION == "2")
+
+# ---------------------------------------------------------------- holdings_import
+hdir = os.path.join(work, "dl")
+os.makedirs(hdir)
+
+
+def make_xlsx(path, title):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append([title])
+    ws.append(["Monthly Portfolio Statement as on 30-Sep-2026"])
+    wb.save(path)
+
+
+make_xlsx(os.path.join(hdir, "a.xlsx"), "Axis Mutual Fund")
+make_xlsx(os.path.join(hdir, "b.xlsx"), "Mystery Fund House")
+with zipfile.ZipFile(os.path.join(hdir, "nippon_portfolio.zip"), "w") as z:
+    z.writestr("x.xls", "data")
+open(os.path.join(hdir, "notes.txt"), "w").write("hi")
+dest = os.path.join(work, "holdings")
+logs = []
+done = holdings_import.import_files([os.path.join(hdir, n) for n in sorted(os.listdir(hdir))], dest, log=logs.append)
+check("an Axis workbook goes to data/holdings/axis", os.path.exists(os.path.join(dest, "axis", "a.xlsx")))
+check("an unrecognised workbook goes to unsorted and says so", os.path.exists(os.path.join(dest, "unsorted", "b.xlsx"))
+      and any("not recognised" in l for l in logs))
+check("a zip is sorted by its name", os.path.exists(os.path.join(dest, "nippon_india", "nippon_portfolio.zip")))
+check("a non-Excel file is skipped", any("notes.txt" in l and "skipped" in l for l in logs))
+logs.clear()
+holdings_import.import_files([os.path.join(hdir, "a.xlsx")], dest, log=logs.append)
+check("importing the same file twice does not duplicate it", any("already imported" in l for l in logs))
+check("no arguments -> exit 2", holdings_import.main([]) == 2)
+
+shutil.rmtree(work, ignore_errors=True)
+print(f"\nAll {passed} checks passed")

@@ -2,4 +2,7 @@ pandas>=2.2
 numpy
 requests
 openpyxl
-xlrd   # only needed to read old .xls portfolio files (Nippon India, Baroda BNP Paribas publish these)
+xlrd   # only needed to read .xls files: old AMC portfolio files (Nippon India, Baroda BNP Paribas) and mf_holdings_screener.py's input
+pdfplumber   # only needed by cdsl_holdings_to_xls.py (reads the CDSL CAS PDF)
+xlwt         # only needed by cdsl_holdings_to_xls.py and mf_holdings_screener.py (write .xls output)
+# pytesseract  # optional: cdsl_holdings_to_xls.py, only for PDFs with no text layer (also needs the Tesseract program)
