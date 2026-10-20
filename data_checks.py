@@ -24,6 +24,9 @@ def _norm_category(text) -> str:
     return " ".join("".join(ch if ch.isalnum() else " " for ch in t).split())
 
 
+norm_category = _norm_category          # public name, also used by check_fund.py
+
+
 def drop_duplicate_codes(df: pd.DataFrame):
     dup = df["scheme_code"].astype(str).duplicated(keep="first")
     return df[~dup].reset_index(drop=True), int(dup.sum())

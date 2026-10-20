@@ -20,9 +20,11 @@ LABELS = {
     "max_drawdown": "Maximum drawdown", "benchmark_excess_return": "3y excess return vs benchmark",
     "rolling_beat_benchmark_pct": "Rolling windows beating benchmark", "portfolio_quality": "Portfolio quality (0-100)",
     "downside_capture": "Downside capture", "quartile_consistency": "Time in top half of peers",
+    "jensen_alpha": "Jensen's alpha (per year, vs benchmark)", "beta": "Beta vs benchmark",
 }
 DIRECTION = {m: "higher" for m in LABELS}
 DIRECTION["downside_capture"] = "lower"
+DIRECTION["beta"] = "lower"
 DIRECTION["max_drawdown"] = "smaller fall"
 PCT = {"cagr_1y", "cagr_3y", "cagr_5y", "rolling_positive_pct", "sip_xirr", "max_drawdown",
        "benchmark_excess_return", "rolling_beat_benchmark_pct", "downside_capture", "quartile_consistency"}
@@ -60,7 +62,7 @@ class RunLog:
 def fmt(metric, v):
     if v is None or (isinstance(v, float) and np.isnan(v)) or pd.isna(v):
         return "n/a"
-    if metric == "benchmark_excess_return":
+    if metric in ("benchmark_excess_return", "jensen_alpha"):
         return f"{v * 100:+.2f} pp"
     if metric in PCT:
         return f"{v * 100:.1f}%"
@@ -103,6 +105,9 @@ def explain(row, weights, policy):
     risks = []
     if pd.notna(dd) and dd <= -0.35:
         risks.append(f"it fell {abs(dd) * 100:.0f}% peak to trough at its worst")
+    beta = row.get("beta")
+    if beta is not None and pd.notna(beta) and beta >= 1.2:
+        risks.append(f"its beta is {beta:.2f}: it has moved about {beta:.1f}x the benchmark, up and down")
     if any(k in cat for k in ("small cap", "sectoral", "thematic")):
         risks.append("this category can be concentrated and volatile")
     if risks:
@@ -118,8 +123,13 @@ def _ranking_rows(df, top_n):
     return rows
 
 
-def write_markdown(path, groups, cfg, run, exploratory=None, top_n=15, detail_n=5, sources=None, benchmarks=None):
-    """groups: [{name, ranked (DataFrame), excluded [(code, name, reasons)], as_of}]; cfg: config module."""
+def write_markdown(path, groups, cfg, run, exploratory=None, top_n=15, detail_n=5, sources=None, benchmarks=None,
+                   input_note=None, extra_sections=None):
+    """groups: [{name, ranked (DataFrame), excluded [(code, name, reasons)], as_of}]; cfg: config module.
+    input_note: when the metrics came from a supplied CSV (rank_funds.py) rather than being computed from NAVs,
+    a sentence describing that input; it replaces the NAV-based method lines. extra_sections: list of
+    (heading, [lines]) appended before the closing notes."""
+    LABELS["rolling_positive_pct"] = f"Rolling {cfg.ROLLING_WINDOW_YEARS:g}y windows positive"
     L = []
     L.append("# Mutual fund ranking")
     L.append("")
@@ -138,10 +148,18 @@ def write_markdown(path, groups, cfg, run, exploratory=None, top_n=15, detail_n=
     L.append(f"- **Low-confidence flag:** a category with fewer than {cfg.MIN_GROUP_SIZE} ranked funds is marked LOW CONFIDENCE.")
     L.append("- **Ranked within category.** Funds in different categories are never ranked together except in the "
              "clearly labelled exploratory list.")
-    L.append(f"- **Risk-free rate:** {cfg.RISK_FREE_RATE * 100:.1f}%; rolling window {cfg.ROLLING_WINDOW_YEARS:g} years (month-end); "
-             f"excess-return period {cfg.BENCHMARK_EXCESS_YEARS:g} years; SIP simulated over {cfg.SIP_YEARS:g} years.")
-    L.append("- **Returns** are computed from Direct-Growth NAVs (mfapi.in / AMFI); drawdown is the worst peak-to-trough "
-             "fall in the available NAV history.")
+    if input_note:
+        L.append(f"- **Input data:** {input_note}")
+    else:
+        L.append(f"- **Risk-free rate:** {cfg.RISK_FREE_RATE * 100:.1f}%; rolling window {cfg.ROLLING_WINDOW_YEARS:g} years (month-end); "
+                 f"excess-return period {cfg.BENCHMARK_EXCESS_YEARS:g} years; SIP simulated over {cfg.SIP_YEARS:g} years.")
+        dd_years = getattr(cfg, "DRAWDOWN_WINDOW_YEARS", None)
+        dd_text = (f"the worst peak-to-trough fall in the last {dd_years:g} years (the same window for every fund)"
+                   if dd_years else "the worst peak-to-trough fall in the fund's whole NAV history")
+        L.append(f"- **Returns** are computed from Direct-Growth NAVs (mfapi.in / AMFI); drawdown is {dd_text}.")
+        if any(cfg.SCORE_WEIGHTS.get(m, 0) > 0 for m in ("jensen_alpha", "beta")):
+            L.append(f"- **Alpha / beta:** regression of monthly excess returns on the benchmark's over the last "
+                     f"{cfg.ALPHA_BETA_YEARS:g} years (needs {cfg.ALPHA_BETA_MIN_MONTHS}+ months).")
     for b in benchmarks or []:
         L.append(f"- **Benchmark:** {b.strip()}")
     for s in sources or []:
@@ -171,6 +189,16 @@ def write_markdown(path, groups, cfg, run, exploratory=None, top_n=15, detail_n=
             L += _table(["Rank", "Fund", "Final score (0-100)", "Composite", "Weight measured", "Data flags"],
                         _ranking_rows(df, top_n))
             L.append("")
+            note = []
+            if n_rank > top_n:
+                note.append(f"Showing the top {top_n} of {n_rank} ranked funds; shortlisted_funds.csv has all of them.")
+            if cfg.SCORING_METHOD == "zscore":
+                note.append("Rank follows the Composite column (z-scores). The 0-100 final score is percentile-based, "
+                            "so two neighbouring funds can appear in a slightly different order; "
+                            "set scoring_method = percentile in weights.ini to make rank follow the final score.")
+            if note:
+                L.append("_" + " ".join(note) + "_")
+                L.append("")
         insuff = df[df["status"] == "INSUFFICIENT_DATA"] if len(df) else df
         if len(insuff):
             L.append("**Not ranked (INSUFFICIENT_DATA):** " + "; ".join(
@@ -221,6 +249,12 @@ def write_markdown(path, groups, cfg, run, exploratory=None, top_n=15, detail_n=
                          f"{r['final_score_0_100']:.1f}", fmt("max_drawdown", r.get("max_drawdown")),
                          f"{r['volatility'] * 100:.0f}%" if pd.notna(r.get("volatility")) else "n/a"])
         L += _table(["Rank", "Fund", "Category", "Final score", "Max drawdown", "Volatility"], rows)
+        L.append("")
+
+    for heading, lines in extra_sections or []:
+        L.append(f"## {heading}")
+        L.append("")
+        L += list(lines)
         L.append("")
 
     L.append("## Notes on missing data")

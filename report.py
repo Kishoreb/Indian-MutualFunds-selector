@@ -16,10 +16,10 @@ PERCENT_COLS = {
     "rolling_positive_pct", "sip_xirr",
     "benchmark_cagr", "benchmark_excess_return", "rolling_beat_benchmark_pct",
     "pq_coverage", "score_coverage",
-    "downside_capture", "quartile_consistency", "q1_share",
+    "downside_capture", "quartile_consistency", "q1_share", "max_drawdown_all", "jensen_alpha",
 }
 # portfolio_quality is on a 0-100 scale; the pq_* inputs are already in percent units.
-RATIO_COLS = {"risk_return_ratio", "sortino_ratio", "composite_score", "portfolio_quality",
+RATIO_COLS = {"beta", "risk_return_ratio", "sortino_ratio", "composite_score", "portfolio_quality",
               "pq_top10_pct", "pq_top_sector_pct", "pq_largemid_pct", "pq_cash_pct",
               "final_score_0_100"}
 

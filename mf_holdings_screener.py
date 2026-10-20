@@ -300,7 +300,8 @@ def analyse_nav(nav_df, category, provider, today):
     m = compute_all_metrics(nav_df, config.RISK_FREE_RATE, sip_years=config.SIP_YEARS,
                             sip_monthly_amount=config.SIP_MONTHLY_AMOUNT,
                             rolling_window_years=config.ROLLING_WINDOW_YEARS,
-                            align_ratio_window=config.RATIO_ALIGN_WINDOW)
+                            align_ratio_window=config.RATIO_ALIGN_WINDOW,
+                            drawdown_window_years=config.DRAWDOWN_WINDOW_YEARS)
     m.update(benchmark.metrics_for_fund(nav_df, provider, category, None))
     last = nav_df["date"].max()
     m["last_nav_date"] = last.date() if hasattr(last, "date") else last
@@ -432,7 +433,7 @@ def decide(f, rules=REVIEW_RULES, rf=None):
     beat = f.get("rolling_beat_benchmark_pct")
     if beat is not None:
         used_bench = True
-        txt = f"Beat the benchmark in {_pc(beat, 0)} of rolling 3-year windows."
+        txt = f"Beat the benchmark in {_pc(beat, 0)} of rolling {config.ROLLING_WINDOW_YEARS:g}-year windows."
         if beat < rules["rolling_beat_red"]:
             flag("benchmark", 2, txt)
         elif beat < rules["rolling_beat_amber"]:
@@ -768,7 +769,7 @@ def build_sheets(headers, rows, info, today, source):
         f"1. Absolute: 3-year CAGR below the risk-free rate = red; 5-year below it = amber.",
         f"2. Benchmark (equity categories with a benchmark in config.py): 3-year excess return at or below "
         f"{rl['bench_excess_red']:.0%} = red, below {rl['bench_excess_amber']:.0%} = amber; beat the benchmark in "
-        f"under {rl['rolling_beat_red']:.0%} of rolling 3-year windows = red, under {rl['rolling_beat_amber']:.0%} = amber.",
+        f"under {rl['rolling_beat_red']:.0%} of rolling {config.ROLLING_WINDOW_YEARS:g}-year windows = red, under {rl['rolling_beat_amber']:.0%} = amber.",
         f"3. Peers: rank among all Direct-Growth funds of the same AMFI category with {rl['min_peer_history_years']:.0f}+ "
         f"years of history, using shortlist.py's scoring engine and weights.ini "
         f"(weights file {os.path.basename(str(config.WEIGHTS_FILE))}, version {config.WEIGHTS_VERSION}; "

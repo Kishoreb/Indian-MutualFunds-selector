@@ -48,7 +48,7 @@ Data sources:
 | `fetch_nav_data.py`        | Downloads & caches NAV history per scheme code                           |
 | `metrics.py`               | CAGR, volatility, risk-return ratio, Sortino, rolling returns, SIP XIRR, max drawdown |
 | `benchmark.py`             | Benchmark data (CSV / pinned code / auto-discovered index-fund proxy), excess return, rolling beat-benchmark % |
-| `extra_metrics.py`         | Downside capture ratio and quartile consistency (off by default)         |
+| `extra_metrics.py`         | Downside capture, quartile consistency, Jensen's alpha and beta (all weight 0 by default) |
 | `portfolio_quality.py`     | Parses AMC portfolio workbooks and computes the 0–100 portfolio-quality score |
 | `holdings_fetch.py`        | Downloads monthly portfolio files for the AMCs that can be automated     |
 | `amc_registry.py`          | Per-AMC knowledge: disclosure page, whether it can be automated, notes   |
@@ -63,6 +63,8 @@ Data sources:
 | `live_check.py`            | One-time check of the live services (mfapi.in, AMFI, benchmarks, optionally AMC downloads) |
 | `cdsl_holdings_to_xls.py`  | Standalone: CDSL CAS PDF → stock `.xls` + mutual fund `-MF.XLS` of your own holdings |
 | `mf_holdings_screener.py`  | Screens each fund in your `-MF.XLS` (metrics, benchmark, peer rank) → `-Screened.XLS` with a keep/review verdict. Uses `config.py`, `metrics.py`, `benchmark.py`, `fetch_nav_data.py`, `shortlist.py` |
+| `check_fund.py`            | **One fund**: give a name or AMFI code → metrics vs peers and benchmark, score/rank, shortlist filters, screen result (see "5. Checking one fund") |
+| `rank_funds.py`            | **Rank from a CSV**: `--input funds.csv` of metric values you supply (spec format or the toolkit's own CSV); no internet (see "6. Ranking a CSV") |
 | `test_*.py`                | Offline tests (synthetic data, no network); see "Tests"                   |
 | `requirements.txt`         | Python dependencies                                                      |
 
@@ -253,11 +255,23 @@ The run also warns if the newest NAV in the data is itself older than `STALE_NAV
   to contain the 2020 crash). The plain `volatility` and `downside_deviation` columns, and the
   `MAX_VOLATILITY` filter, still use the whole history.
 - **Sortino ratio**: same, divided by downside deviation over the same window.
-- **Rolling 3-year returns**: trailing 3-year CAGR at every month-end; summarised
-  as average, minimum, std-dev and `rolling_positive_pct` (share of windows > 0).
+- **Rolling returns (3 or 5 years)**: trailing CAGR at every month-end; summarised
+  as average, minimum, std-dev and `rolling_positive_pct` (share of windows > 0). The window is
+  `ROLLING_WINDOW_YEARS` in `config.py` (default 3), or `--rolling-years 5` on `shortlist.py` and
+  `check_fund.py`; it also sets the window of the beat-the-benchmark metric and the labels in the
+  reports. At least 12 windows are needed, so a 5-year window needs about 6 years of NAV history;
+  a younger fund simply has that metric missing (handled by the missing-data policy).
 - **SIP XIRR**: monthly SIP simulated over the trailing `SIP_YEARS`.
-- **Max drawdown**: largest peak-to-trough NAV decline over the fund's history
-  (stored negative; a smaller fall scores higher).
+- **Max drawdown**: largest peak-to-trough NAV decline over the **last 3 years** (`DRAWDOWN_WINDOW_YEARS`
+  in `config.py`), the same window for every fund, as the spec asks (stored negative; a smaller fall
+  scores higher). A fund with less than 3 years of history has it missing. Set the option to `None`
+  for the old whole-history figure; the whole-history number is always saved as `max_drawdown_all`.
+- **Jensen's alpha and beta** (`extra_metrics.py`, weight 0 by default; give them a weight in
+  `weights.ini` to use them): regression of the fund's monthly returns over the risk-free rate on the
+  benchmark's, over the last 36 months (at least 24 common months, else missing). Beta is the slope
+  (scored **lower is better**); alpha is the intercept times 12, a per-year figure. The benchmark is the
+  same one used elsewhere, usually an index-fund proxy that trails the true TRI, so alpha is flattered a
+  little; load a real TRI with `import_tri.py` for better accuracy.
 - **Downside capture** (`extra_metrics.py`, off by default): over the months the
   benchmark fell, the fund's average monthly return divided by the benchmark's
   (below 1.00 = lost less than the benchmark; **lower is better**; negative = the
@@ -537,6 +551,43 @@ an absolute measure of quality. Verdicts are only as good as the data: check
 rows whose Match Method says "Name match" and any `Check` flags carried over from
 the CAS extraction.
 
+## 5. Checking one fund: `check_fund.py`
+
+```bash
+python check_fund.py "Axis Small Cap"
+python check_fund.py 125354                               # AMFI scheme code
+python check_fund.py "Parag Parikh Flexi Cap" --rolling-years 5 --no-peers
+python check_fund.py "Axis Small Cap" --navall NAVAll.txt  # AMFI file saved in a browser
+```
+
+It finds the Direct-Growth scheme in AMFI's NAVAll file (if several fit, it lists them and you pass a
+scheme code), fetches the NAV history of the fund and of its category peers, and prints and saves
+`output/fund_check_<code>.docx`: the screen result (same rules as section 4), rank and score among the
+peers with the `weights.ini` weights, every metric against the peer median, whether the fund passes the
+`config.py` hard filters, and the top of its category. Index, fund-of-funds, sectoral and debt funds have
+no fair peer group, so they are judged on benchmark and absolute returns only.
+
+It answers "how has it done?", **not** "should I invest?": the result looks at past NAV data only and
+ignores your goal, horizon, tax, exit load, fund manager and the fund's portfolio; the expense ratio is
+deliberately not used. Exit status 0 = report written, 1 = NAV data could not be fetched, 2 = bad
+command line / weights file / fund not found or ambiguous.
+
+## 6. Ranking a CSV: `rank_funds.py`
+
+```bash
+python rank_funds.py --input funds.csv
+python rank_funds.py --input shortlisted_funds.csv --category "small cap" --weights weights.ini
+```
+
+Ranks funds from metric values you supply, offline, with `scoring.py` and `weights.ini`. Two column styles
+are read (the header of `rank_funds.py` lists them): the specification's (`fund_name`, `return_3y`,
+`maximum_drawdown`, ... in percent) and the toolkit's own CSV (fractions). A blank cell is missing; a
+non-number or impossible value (a positive drawdown, a score above 100) is flagged `INVALID(column)` and
+treated as missing; identical duplicate rows are dropped; non-Direct-Growth rows are rejected unless
+`--include-all-plans`; stale dates are flagged/excluded like in `shortlist.py`; funds are ranked within
+their `fund_category`. Output: `ranked_funds.csv`, `ranked_funds.md`, `run_log.txt` in `--output-dir`.
+Exit status 0 = done, 1 = nothing could be ranked (no files but the log), 2 = bad input.
+
 ## Tests
 
 ```bash
@@ -544,6 +595,9 @@ python test_scoring.py                # 94 checks: weights.ini, scoring engine, 
 python test_pipeline.py               # 51 checks: shortlist.py end to end (CLI, multi-category, filters, outputs, exit codes) and holdings_import
 python test_screener_peers.py         # 17 checks: peer ranking when some funds are left unranked
 python test_metrics_window.py         # 18 checks: the aligned 3-year ratio window and the relaxed default filters
+python test_new_metrics.py            # 3-year drawdown window, alpha/beta against a known regression, 3y/5y rolling option
+python test_check_fund.py             # check_fund.py: name matching, peers, report, exit codes
+python test_rank_funds.py             # rank_funds.py: the spec's input checks, units, plan filter, exit codes
 python test_benchmark.py
 python test_portfolio_quality.py
 python test_mf_holdings_screener.py
@@ -589,7 +643,7 @@ columns, which `parse_navall` now reads from the header row (`navall_diag.py` sh
 | 3. Rolling consistency vs benchmark | ✅ `rolling_beat_benchmark_pct` (benchmark = index-fund proxy unless you supply a TRI csv with `import_tri.py`) |
 | 4. Benchmark excess return | ✅ `benchmark_excess_return` (same caveat) |
 | 5. Risk-adjusted return | ✅ Sharpe-style ratio + Sortino, as two separate weights (computed from 3y CAGR and monthly volatility, not from a full monthly excess-return series) |
-| 6. Maximum drawdown | ✅ `max_drawdown` |
+| 6. Maximum drawdown | ✅ `max_drawdown`, over a common trailing 3-year window (`DRAWDOWN_WINDOW_YEARS`) |
 | 7. Expense ratio | ⛔ not implemented (excluded on request) |
 | 8. Portfolio quality | ✅ needs holdings files (see above); missing for funds without one |
 | External weights file, validated, version recorded | ✅ `weights.ini` (INI instead of JSON), `--weights` option |
@@ -603,17 +657,13 @@ columns, which `parse_navall` now reads from the header row (`navall_diag.py` sh
 | Non-zero exit on fatal errors | ✅ 1 = nothing ranked, 2 = bad input/config |
 | Automated tests for the scoring engine | ✅ `test_scoring.py`, `test_pipeline.py` |
 
-**Not done from the spec:** the spec's CSV-input command line (`rank_funds.py --input funds.csv`
-with pre-computed metric values) — the toolkit computes metrics from NAV history itself;
-`scoring.py` has no network or config dependency, so it can be driven from such a file if you
-want one. A single blended `risk_adjusted_return` parameter (Sharpe/Sortino average) — they are
-two weights here.
+**CSV-input command line:** ✅ `rank_funds.py --input funds.csv` (section 6). **Not done from the spec:** a single blended `risk_adjusted_return` parameter (Sharpe/Sortino average) — they are two weights here.
 
 **From the older blueprint document** (`mutual_fund_agent_architecture_prompting_blueprint.md`):
-downside capture and quartile consistency are implemented (off by default); AUM, manager-tenure,
+downside capture, quartile consistency, Jensen's alpha and beta are implemented (off by default; the blueprint's own weights are not used — weights live in `weights.ini`); 3-year rolling returns with a 5-year option (`--rolling-years 5`); AUM, manager-tenure,
 turnover, cash and top-10 filters are implemented but need your own `data/fund_attributes.csv`
 and are off by default; per-fund written summaries are rule-based text in `ranked_funds.md`
-(no LLM call); expense ratio is excluded on request.
+(AI-written summaries are deferred, by decision); expense ratio is excluded on request.
 
 ## Notes & caveats
 

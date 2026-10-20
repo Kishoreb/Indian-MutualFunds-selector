@@ -5,7 +5,8 @@ Reads and validates weights.ini (score weights + scoring policy).
 
 Nothing is ever silently replaced: a missing file, a missing or unknown metric,
 a non-numeric or negative weight, or a total other than 100 raises WeightsError
-with a message saying what is wrong.
+with a message saying what is wrong. The two metrics added later (jensen_alpha, beta) may be left
+out of a file written before they existed; they then count as 0.
 """
 
 import configparser
@@ -16,7 +17,11 @@ KNOWN_METRICS = [
     "rolling_positive_pct", "sip_xirr", "max_drawdown", "benchmark_excess_return",
     "rolling_beat_benchmark_pct", "portfolio_quality",
     "downside_capture", "quartile_consistency",
+    "jensen_alpha", "beta",
 ]
+# Metrics added after the first release. A weights file that does not list them still loads:
+# they are treated as 0 (off), so an older weights.ini keeps working unchanged.
+OPTIONAL_METRICS = ("jensen_alpha", "beta")
 POLICIES = ("renormalize_available", "average")
 METHODS = ("zscore", "percentile")
 TOLERANCE = 1e-6
@@ -74,6 +79,8 @@ def load(path: str) -> dict:
     if unknown:
         raise WeightsError(f"{path}: unknown metric(s) in [weights_percent]: {', '.join(unknown)}. "
                            f"Known: {', '.join(KNOWN_METRICS)}")
+    for k in OPTIONAL_METRICS:
+        raw.setdefault(k, "0")
     missing = [k for k in KNOWN_METRICS if k not in raw]
     if missing:
         raise WeightsError(f"{path}: [weights_percent] is missing: {', '.join(missing)} "

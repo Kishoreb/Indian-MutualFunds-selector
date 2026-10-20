@@ -25,7 +25,7 @@ How a score is built
 import numpy as np
 import pandas as pd
 
-LOWER_IS_BETTER = {"downside_capture"}
+LOWER_IS_BETTER = {"downside_capture", "beta"}
 
 
 def _active(weights):

@@ -75,11 +75,24 @@ def calculate_volatility(df: pd.DataFrame) -> float | None:
     return float(monthly_returns.std() * np.sqrt(12))
 
 
-def calculate_max_drawdown(df: pd.DataFrame) -> float | None:
-    """Largest peak-to-trough decline over the fund's history, as a
-    negative fraction (e.g. -0.32 means a 32% drawdown)."""
+def calculate_max_drawdown(df: pd.DataFrame, window_years: float | None = None) -> float | None:
+    """Largest peak-to-trough decline, as a negative fraction (e.g. -0.32 means a 32% drawdown).
+
+    window_years=None  -> over the fund's whole NAV history (older funds, which contain the 2020 crash,
+                          then look worse than younger ones).
+    window_years=3     -> over the last 3 years only, the same window for every fund, so funds of
+                          different ages are compared on the same stretch of market.  Returns None if the
+                          fund does not have that much history (nothing is estimated)."""
     if df.empty:
         return None
+    if window_years:
+        end = df["date"].max()
+        start = end - timedelta(days=int(window_years * 365.25))
+        if df["date"].min() > start + timedelta(days=30):
+            return None
+        df = df[df["date"] >= start]
+        if df.empty:
+            return None
     nav = df.set_index("date")["nav"]
     running_max = nav.cummax()
     drawdown = (nav - running_max) / running_max
@@ -262,7 +275,8 @@ def calculate_sip_xirr(df: pd.DataFrame, years: float, monthly_amount: float = 1
 def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
                          sip_years: float = 3.0, sip_monthly_amount: float = 1000.0,
                          rolling_window_years: float = 3.0,
-                         align_ratio_window: bool = True) -> dict:
+                         align_ratio_window: bool = True,
+                         drawdown_window_years: float | None = None) -> dict:
     """Computes the full metrics dict for one fund's NAV history.
 
     align_ratio_window (default True): the Sharpe-style and Sortino ratios divide a return by a risk
@@ -271,12 +285,18 @@ def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
     same trailing period (last 36 / 60 / 12 monthly returns). Set it to False to restore the old
     behaviour, where the risk side covered the fund's whole history (so a fund old enough to contain
     the 2020 crash was penalised against a younger one). The `volatility` and `downside_deviation`
-    columns always stay whole-history; `ratio_window_years` records the window the ratios used."""
+    columns always stay whole-history; `ratio_window_years` records the window the ratios used.
+
+    drawdown_window_years (default None = whole history): when set (config.DRAWDOWN_WINDOW_YEARS, 3), the
+    `max_drawdown` column is the worst fall inside that trailing window, the same for every fund, and is
+    left missing for a fund with less history than the window.  `max_drawdown_all` always holds the
+    whole-history figure."""
     cagr_1y = calculate_cagr(df, 1)
     cagr_3y = calculate_cagr(df, 3)
     cagr_5y = calculate_cagr(df, 5)
     volatility = calculate_volatility(df)
-    max_dd = calculate_max_drawdown(df)
+    max_dd_all = calculate_max_drawdown(df)
+    max_dd = calculate_max_drawdown(df, drawdown_window_years) if drawdown_window_years else max_dd_all
 
     # Use 3-year CAGR (falling back to 5y, then 1y) as the "return" leg of
     # the risk-adjusted ratios, since it best balances recency and stability.
@@ -311,6 +331,8 @@ def compute_all_metrics(df: pd.DataFrame, risk_free_rate: float,
         "cagr_5y": cagr_5y,
         "volatility": volatility,
         "max_drawdown": max_dd,
+        "max_drawdown_all": max_dd_all,
+        "drawdown_window_years": float(drawdown_window_years) if drawdown_window_years else None,
         "risk_return_ratio": risk_return_ratio,
         "downside_deviation": downside_dev,
         "sortino_ratio": sortino_ratio,

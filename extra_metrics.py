@@ -1,13 +1,24 @@
 """
 extra_metrics.py
 ----------------
-Two metrics from the older blueprint, computed only from NAV history and the benchmark
+Metrics from the older blueprint, computed only from NAV history and the benchmark
 series already used by benchmark.py (nothing is estimated):
 
   downside_capture      How much of the benchmark's losses the fund took, in the months the
                         benchmark fell: mean(fund monthly return) / mean(benchmark monthly
                         return) over those months (arithmetic means). Below 1.00 (100%) = the
                         fund lost less than the benchmark. LOWER IS BETTER. Needs >= 6 down months.
+
+  jensen_alpha, beta    Regression of the fund's monthly EXCESS returns (over the risk-free rate) on the
+                        benchmark's, using the last `years` (default 3) years of month-end returns:
+                            excess_fund = alpha_m + beta * excess_bench + error
+                        beta  = cov(fund, bench) / var(bench)  (1.0 = moves with the benchmark;
+                                above 1 = amplifies it; below 1 = dampens it).
+                        jensen_alpha = alpha_m * 12, the annual return beyond what beta explains
+                                (a fraction: 0.02 = +2 percentage points a year).
+                        Needs >= `min_months` common months and a benchmark no staler than the fund.
+                        The benchmark is usually an index-fund proxy that trails the true TRI by roughly
+                        its expense ratio, which flatters alpha a little (see README).
 
   quartile_consistency  Share of rolling-return dates (month-ends, trailing-window CAGR) on which
                         the fund was in the top half (Q1 or Q2) of its peer group. Dates with
@@ -43,6 +54,35 @@ def downside_capture(fund_df: pd.DataFrame, bench_df: pd.DataFrame,
     if bench_mean == 0:
         return None
     return float(f[down].mean() / bench_mean)
+
+
+EMPTY_ALPHA_BETA = {"jensen_alpha": None, "beta": None, "alpha_beta_months": 0}
+
+
+def alpha_beta(fund_df: pd.DataFrame, bench_df: pd.DataFrame, risk_free_rate: float,
+               years: float = 3.0, min_months: int = 24, max_staleness_days: int = 10) -> dict:
+    """Beta and Jensen's alpha of the fund against the benchmark (see the module docstring).
+    Always returns the three keys of EMPTY_ALPHA_BETA; the first two are None when not measurable."""
+    out = dict(EMPTY_ALPHA_BETA)
+    if fund_df is None or bench_df is None or fund_df.empty or bench_df.empty:
+        return out
+    if (fund_df["date"].max() - bench_df["date"].max()).days > max_staleness_days:
+        return out                                   # benchmark lags the fund: do not compare mismatched months
+    f, b = _month_end_returns(fund_df), _month_end_returns(bench_df)
+    common = f.index.intersection(b.index)
+    n = int(round(years * 12))
+    common = common[-n:]
+    if len(common) < min_months:
+        return out
+    rf_m = (1.0 + risk_free_rate) ** (1.0 / 12.0) - 1.0
+    fe, be = f[common] - rf_m, b[common] - rf_m
+    var_b = float(be.var(ddof=1))
+    if not np.isfinite(var_b) or var_b <= 0:
+        return out
+    beta = float(np.cov(fe.values, be.values, ddof=1)[0, 1] / var_b)
+    alpha_m = float(fe.mean() - beta * be.mean())
+    out.update(jensen_alpha=alpha_m * 12.0, beta=beta, alpha_beta_months=int(len(common)))
+    return out
 
 
 def quartile_consistency(rolling_by_code: dict, min_peers: int = 8) -> dict:

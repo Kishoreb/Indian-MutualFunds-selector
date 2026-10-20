@@ -76,12 +76,28 @@ EXCLUDE_STALE_FUNDS = True   # stale funds are usually merged/closed; they are l
 # ---------------------------------------------------------------------------
 SIP_YEARS = 3.0
 SIP_MONTHLY_AMOUNT = 1000
+# Rolling-return window for rolling_positive_pct, rolling_beat_benchmark_pct and quartile_consistency.
+# 3 (default) or 5; also settable per run with --rolling-years 5. A 5-year window needs more history:
+# a fund (or benchmark) needs 6+ years of NAVs to have the 12 rolling windows these metrics require,
+# so with 5 years some younger funds will show those metrics as missing (handled by the missing-data policy).
 ROLLING_WINDOW_YEARS = 3.0
 
 # The Sharpe-style and Sortino ratios divide a return (3y CAGR, else 5y, else 1y) by a risk figure.
 # True: that risk figure is measured over the SAME trailing period as the return. False: over the
 # fund's whole history (old behaviour; penalises funds old enough to contain the 2020 crash).
 RATIO_ALIGN_WINDOW = True
+
+# Maximum drawdown window. 3 = the worst fall inside the last 3 years, the same window for every fund,
+# so an older fund is not marked down for a crash a younger fund never lived through. A fund with less
+# history than this gets no drawdown (left missing, never estimated). None = whole NAV history (old behaviour).
+# The whole-history figure is still saved in the max_drawdown_all column.
+DRAWDOWN_WINDOW_YEARS = 3.0
+
+# Beta and Jensen's alpha (jensen_alpha, beta metrics; weights default to 0 in weights.ini): regression of
+# the fund's monthly excess returns on the benchmark's, over the last ALPHA_BETA_YEARS years of month-end
+# returns. Fewer than ALPHA_BETA_MIN_MONTHS common months -> left missing.
+ALPHA_BETA_YEARS = 3.0
+ALPHA_BETA_MIN_MONTHS = 24
 
 # Quartile consistency (quartile_consistency metric): needs at least this many funds
 # with a rolling return on a date for that date to count.

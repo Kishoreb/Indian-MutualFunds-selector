@@ -20,6 +20,7 @@ Usage:
     python shortlist.py --category "small cap" --category "mid cap"     # each ranked separately
     python shortlist.py --all-categories                               # + a labelled exploratory list
     python shortlist.py "small cap" --weights my_weights.ini --output-dir out
+    python shortlist.py "small cap" --rolling-years 5                 # 5-year rolling windows
     python shortlist.py my_funds.csv                                   # CSV with a 'scheme_code' column
 
 Exit status: 0 = finished and wrote output; 1 = nothing could be ranked/no funds; 2 = bad
@@ -82,10 +83,11 @@ METRIC_COLUMNS = ["scheme_code", "scheme_name", "fund_house", "scheme_category",
                   "cagr_1y", "cagr_3y", "cagr_5y", "volatility", "risk_return_ratio",
                   "sortino_ratio", "downside_deviation", "ratio_window_years", "rolling_avg", "rolling_min",
                   "rolling_positive_pct", "rolling_std", "sip_xirr",
-                  "max_drawdown", "history_years",
+                  "max_drawdown", "max_drawdown_all", "drawdown_window_years", "history_years",
                   "benchmark_name", "benchmark_proxy", "benchmark_cagr",
                   "benchmark_excess_return", "rolling_beat_benchmark_pct", "benchmark_windows",
-                  "downside_capture", "quartile_consistency", "q1_share",
+                  "downside_capture", "jensen_alpha", "beta", "alpha_beta_months",
+                  "quartile_consistency", "q1_share",
                   "portfolio_quality", "pq_coverage", "pq_top10_pct", "pq_holdings", "pq_top_sector_pct",
                   "pq_largemid_pct", "pq_cash_pct", "pq_as_of", "pq_source", "pq_note",
                   "last_nav_date"]
@@ -119,6 +121,7 @@ def build_metrics_table(fund_list: pd.DataFrame, force_refresh: bool = False, lo
             sip_years=config.SIP_YEARS, sip_monthly_amount=config.SIP_MONTHLY_AMOUNT,
             rolling_window_years=config.ROLLING_WINDOW_YEARS,
             align_ratio_window=config.RATIO_ALIGN_WINDOW,
+            drawdown_window_years=config.DRAWDOWN_WINDOW_YEARS,
         )
         m["scheme_code"] = code
         m["scheme_name"] = meta.get("scheme_name", "") or getattr(row, "scheme_name_hint", "")
@@ -133,6 +136,10 @@ def build_metrics_table(fund_list: pd.DataFrame, force_refresh: bool = False, lo
         if bench_provider is not None:
             bench = bench_provider.get(benchmark.category_key(m["scheme_category"], default_key))
         m["downside_capture"] = extra_metrics.downside_capture(nav_df, bench["df"]) if bench else None
+        m.update(extra_metrics.alpha_beta(nav_df, bench["df"], config.RISK_FREE_RATE, years=config.ALPHA_BETA_YEARS,
+                                          min_months=config.ALPHA_BETA_MIN_MONTHS,
+                                          max_staleness_days=config.BENCHMARK_MAX_STALENESS_DAYS)
+                 if bench else extra_metrics.EMPTY_ALPHA_BETA)
         try:
             rolling_by_code[str(code)] = benchmark._rolling_cagr(benchmark._month_end_nav(nav_df),
                                                                   config.ROLLING_WINDOW_YEARS)
@@ -258,7 +265,7 @@ def prepare_group(metrics_df: pd.DataFrame, log: report_md.RunLog, reference_dat
 
 DISPLAY_COLS = ["rank", "scheme_name", "cagr_1y", "cagr_3y", "cagr_5y", "sortino_ratio",
                 "rolling_positive_pct", "sip_xirr", "max_drawdown", "benchmark_excess_return",
-                "rolling_beat_benchmark_pct", "downside_capture", "portfolio_quality",
+                "rolling_beat_benchmark_pct", "downside_capture", "jensen_alpha", "beta", "portfolio_quality",
                 "final_score_0_100", "composite_score", "score_coverage", "status"]
 
 
@@ -268,11 +275,12 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
                 "downside_deviation", "rolling_avg", "rolling_min", "rolling_std",
                 "rolling_positive_pct", "sip_xirr",
                 "benchmark_cagr", "benchmark_excess_return", "rolling_beat_benchmark_pct",
-                "pq_coverage", "score_coverage", "downside_capture", "quartile_consistency", "q1_share"]
+                "pq_coverage", "score_coverage", "downside_capture", "quartile_consistency", "q1_share",
+                "max_drawdown_all", "jensen_alpha"]
     for c in pct_cols:
         if c in pretty.columns:
             pretty[c] = pretty[c].apply(lambda v: f"{v*100:.2f}%" if pd.notna(v) else "N/A")
-    for c in ["risk_return_ratio", "sortino_ratio"]:
+    for c in ["risk_return_ratio", "sortino_ratio", "beta"]:
         if c in pretty.columns:
             pretty[c] = pretty[c].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "N/A")
     if "portfolio_quality" in pretty.columns:
@@ -299,7 +307,20 @@ def _parse_args(argv):
     ap.add_argument("--as-of-date", help="YYYY-MM-DD reference date for the stale-NAV check "
                                          "(default: the newest NAV date in each group)")
     ap.add_argument("--top-n", type=int, default=None, help=f"funds to show per category (default {config.TOP_N})")
+    ap.add_argument("--rolling-years", type=float, default=None,
+                    help=f"rolling-return window in years, e.g. 3 or 5 (default {config.ROLLING_WINDOW_YEARS:g}, "
+                         f"config.ROLLING_WINDOW_YEARS)")
     return ap.parse_args(argv)
+
+
+def set_rolling_years(years):
+    """Applies --rolling-years for this run. Returns an error message, or None if fine."""
+    if years is None:
+        return None
+    if not (1.0 <= years <= 10.0):
+        return f"--rolling-years must be between 1 and 10, got {years:g}"
+    config.ROLLING_WINDOW_YEARS = float(years)
+    return None
 
 
 def main(argv=None) -> int:
@@ -311,6 +332,10 @@ def main(argv=None) -> int:
             config.apply_weights(args.weights)
     except weights_loader.WeightsError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    err = set_rolling_years(args.rolling_years)
+    if err:
+        print(f"ERROR: {err}", file=sys.stderr)
         return 2
     out_dir = args.output_dir or config.OUTPUT_DIR
     top_n = args.top_n or config.TOP_N
@@ -352,6 +377,8 @@ def main(argv=None) -> int:
     log.add(f"Weights file: {config.WEIGHTS_FILE} (version {config.WEIGHTS_VERSION}); policy {config.MISSING_DATA_POLICY}; "
             f"method {config.SCORING_METHOD}; coverage floor {config.MIN_SCORE_COVERAGE:.0%}; low-confidence below "
             f"{config.MIN_GROUP_SIZE} funds")
+    log.add(f"Rolling window {config.ROLLING_WINDOW_YEARS:g} years; max-drawdown window "
+            f"{('%g years' % config.DRAWDOWN_WINDOW_YEARS) if config.DRAWDOWN_WINDOW_YEARS else 'whole history'}")
     log.add("Weights %: " + ", ".join(f"{m}={w * 100:g}" for m, w in config.SCORE_WEIGHTS.items() if w > 0))
 
     jobs = []   # (group name, fund_list)
@@ -430,7 +457,8 @@ def main(argv=None) -> int:
     for g in ranked_groups:
         top = g["ranked"].head(top_n)
         log.add(f"\n=== {g['name']}: top {len(top)} ===\n")
-        cols = [c for c in DISPLAY_COLS if c in top.columns]
+        cols = [c for c in DISPLAY_COLS if c in top.columns
+                and (c not in ("jensen_alpha", "beta") or config.SCORE_WEIGHTS.get(c, 0) > 0)]
         log.add(format_for_display(top)[cols].to_string(index=False))
     log_path = os.path.join(out_dir, config.OUTPUT_LOG)
     log.write(log_path)
