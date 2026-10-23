@@ -21,9 +21,11 @@ Expense ratio is deliberately not scored.
 The toolkit also includes a separate utility, `cdsl_holdings_to_xls.py`, that
 extracts **your own** stock and mutual fund holdings from a CDSL Consolidated
 Account Statement (CAS) PDF into Excel (see "Extracting your holdings from a
-CDSL CAS PDF" below), and `mf_holdings_screener.py` that screens each fund in
+CDSL CAS PDF" below), `mf_holdings_screener.py` that screens each fund in
 that file and says whether to keep holding it (see "Screening the funds you
-already hold" below). The second one reuses the shortlisting modules.
+already hold" below), and `compare_funds.py` that compares 2 to 12 funds of your
+choice side by side, read from `input.xls`, into one Excel file (see "7. Comparing
+several funds" below). The last two reuse the shortlisting modules.
 
 Data sources:
 - The universe of mutual fund schemes and each fund's NAV history come from
@@ -65,6 +67,7 @@ Data sources:
 | `mf_holdings_screener.py`  | Screens each fund in your `-MF.XLS` (metrics, benchmark, peer rank) → `-Screened.XLS` with a keep/review verdict. Uses `config.py`, `metrics.py`, `benchmark.py`, `fetch_nav_data.py`, `shortlist.py` |
 | `check_fund.py`            | **One fund**: give a name or AMFI code → metrics vs peers and benchmark, score/rank, shortlist filters, screen result (see "5. Checking one fund") |
 | `rank_funds.py`            | **Rank from a CSV**: `--input funds.csv` of metric values you supply (spec format or the toolkit's own CSV); no internet (see "6. Ranking a CSV") |
+| `compare_funds.py`         | **Several funds side by side**: names or scheme codes from `input.xls` (or the command line) → one Excel comparison file (see "7. Comparing several funds") |
 | `test_*.py`                | Offline tests (synthetic data, no network); see "Tests"                   |
 | `requirements.txt`         | Python dependencies                                                      |
 
@@ -76,8 +79,8 @@ Keep all `.py` files and `weights.ini` in one folder. Data is created under `./d
 pip install -r requirements.txt
 ```
 
-`xlrd` is only needed for old `.xls` portfolio files (Nippon India and Baroda
-BNP Paribas publish those). `pdfplumber` and `xlwt` are needed only by
+`xlrd` is only needed for old `.xls` files: the portfolio files (Nippon India and Baroda
+BNP Paribas publish those) and an `input.xls` fund list for `compare_funds.py`. `pdfplumber` and `xlwt` are needed only by
 `cdsl_holdings_to_xls.py`; `pytesseract` plus the Tesseract program are needed
 only if your CAS PDF has no text layer (see the CDSL section).
 `mf_holdings_screener.py` reads the holdings `.xls` with `xlrd` and writes `.xls`
@@ -257,8 +260,8 @@ The run also warns if the newest NAV in the data is itself older than `STALE_NAV
 - **Sortino ratio**: same, divided by downside deviation over the same window.
 - **Rolling returns (3 or 5 years)**: trailing CAGR at every month-end; summarised
   as average, minimum, std-dev and `rolling_positive_pct` (share of windows > 0). The window is
-  `ROLLING_WINDOW_YEARS` in `config.py` (default 3), or `--rolling-years 5` on `shortlist.py` and
-  `check_fund.py`; it also sets the window of the beat-the-benchmark metric and the labels in the
+  `ROLLING_WINDOW_YEARS` in `config.py` (default 3), or `--rolling-years 5` on `shortlist.py`,
+  `check_fund.py` and `compare_funds.py`; it also sets the window of the beat-the-benchmark metric and the labels in the
   reports. At least 12 windows are needed, so a 5-year window needs about 6 years of NAV history;
   a younger fund simply has that metric missing (handled by the missing-data policy).
 - **SIP XIRR**: monthly SIP simulated over the trailing `SIP_YEARS`.
@@ -588,6 +591,62 @@ treated as missing; identical duplicate rows are dropped; non-Direct-Growth rows
 their `fund_category`. Output: `ranked_funds.csv`, `ranked_funds.md`, `run_log.txt` in `--output-dir`.
 Exit status 0 = done, 1 = nothing could be ranked (no files but the log), 2 = bad input.
 
+## 7. Comparing several funds: `compare_funds.py`
+
+Use it when you have 2 to 12 funds in mind (say 5 or 6) and want them side by side in one Excel file.
+List the funds in **`input.xls`** and run:
+
+```bash
+python compare_funds.py                                  # funds from input.xls, in the current folder
+python compare_funds.py -i my_funds.xlsx -o compare.xlsx # another input file, chosen output file
+python compare_funds.py "Axis Small Cap" 125354 "Quant Small Cap"   # funds on the command line instead
+python compare_funds.py --no-peers                       # faster: no category peers, ranked among your funds only
+python compare_funds.py --navall NAVAll.txt --rolling-years 5 --refresh
+```
+
+**The input file.** One fund per row. Each cell is a fund **name or an AMFI scheme code**, and the two can
+be mixed. The fund column is the one headed Fund / Scheme / Name / Code / ISIN, otherwise the first column;
+a header row is optional. Blank rows and repeated funds are ignored, and a code that Excel stored as
+`125354.0` still matches. `.xls` (needs `xlrd`), `.xlsx`, `.csv` and an HTML or text file saved with an
+`.xls` name all work. Funds typed on the command line replace the file; giving both `-i` and command-line
+funds is an error.
+
+| Option | Meaning |
+|---|---|
+| `funds ...` | Optional. Funds on the command line (each as one argument: a quoted name or a scheme code). When none are given the funds are read from the input file |
+| `-i`, `--input FILE` | Input file listing the funds (default `input.xls`) |
+| `-o`, `--output FILE` | Output `.xlsx` (default `output/compare_funds_<date>.xlsx`) |
+| `--navall FILE` | AMFI `NAVAll.txt` you saved yourself, when the download is blocked |
+| `--no-peers` | Skip the category peers (faster; ranking among your funds only, and it says so) |
+| `--refresh` | Re-download NAV data instead of using the cache |
+| `--weights FILE` | Weights file (default `weights.ini` next to `config.py`) |
+| `--rolling-years N` | Rolling-return window, e.g. 3 or 5 |
+| `--workers N` | Parallel NAV downloads (default 4) |
+
+**Output** (one `.xlsx`): sheet *Comparison*: one column per fund and one row per metric, with each
+metric's `weights.ini` weight, the screen result, rank / percentile / score within the fund's **whole
+category**, category medians, red / amber / green notes, and whether the fund passes the shortlist hard
+filters; the best value in each row is shaded green and the worst red, only among funds of the same
+category. Sheet *Funds*: the same numbers as plain values, one row per fund, easy to sort and filter.
+Sheet *Notes*: method, weights file and version, benchmarks, peer groups, how each name matched, problems,
+and the risk disclaimer.
+
+**How it differs from `shortlist.py`.** No hard filter ever removes one of your funds; the filters are only
+reported. Ranks and scores come from all Direct-Growth peers of the category with 3+ years of history, not
+only from your 5 or 6 funds, so a tiny sample does not give meaningless z-scores. Funds of different
+categories can be in one file; each is scored against its own category and the notes say so. Index,
+fund-of-funds, sectoral/thematic and debt funds have no fair peer group, so they get no rank or score,
+only their metrics, benchmark comparison and screen result.
+
+A name that matches no scheme, or more than one, stops the run and lists the candidates; put the scheme
+code in the file for those funds. Exit status 0 = file written, 1 = none of the funds had usable NAV data,
+2 = bad command line, weights file or input file, fund not found / ambiguous, AMFI file unavailable, or
+`openpyxl` missing.
+
+Like the rest of the toolkit it is a screen of **past** NAV data, not advice: expense ratio is deliberately
+not used, and exit load, fund-manager changes, tax and your own goals are not considered. The blended
+Sharpe/Sortino parameter is not offered here either (dropped by decision, see below).
+
 ## Tests
 
 ```bash
@@ -612,7 +671,10 @@ and the outputs, not the live integrations. `test_mf_holdings_screener.py` uses
 synthetic NAV series and a synthetic AMFI file; it checks the ISIN/name mapping, the
 verdict rules, the peer ranking and the output file, and says nothing about real
 funds. `cdsl_holdings_to_xls.py` has no automated tests; it was checked by running it
-on one real statement and reconciling against the printed totals.
+on one real statement and reconciling against the printed totals. `compare_funds.py`
+has no `test_compare_funds.py` yet: only its input-file reading was tried (on small
+`.xlsx` and HTML-as-`.xls` files) and it passes a syntax check; the comparison itself
+has not been run.
 
 ## Things not yet proven against live services
 
@@ -625,8 +687,9 @@ PASS / WARN / FAIL per step and exits non-zero on a failure:
 - AMFI's `NAVAll.txt` (used by `mf_holdings_screener.py`)
 - the three `auto` AMC portfolio downloaders
 - `holdings_import.py` and `build_marketcap.py` on real files
-- `shortlist.py`, `mf_holdings_screener.py` and `cdsl_holdings_to_xls.py` on a real first run — check the
-  first real output (benchmark names, Match Method, Peer Group Size, `data_flags`) before trusting it
+- `shortlist.py`, `mf_holdings_screener.py`, `compare_funds.py` and `cdsl_holdings_to_xls.py` on a real first run — check the
+  first real output (benchmark names, Match Method, Peer Group Size, `data_flags`; for `compare_funds.py` the *Notes* sheet and
+  a few numbers against `check_fund.py`) before trusting it
 
 **First live check (Oct 2026):** mfapi.in, category lookup, NAV download and all benchmark proxies
 worked. Two warnings: the *large & mid cap* proxy has only ~4.9 years of history and the *multi cap*
@@ -642,7 +705,7 @@ columns, which `parse_navall` now reads from the header row (`navall_diag.py` sh
 | 2. 5-year return | ✅ `cagr_5y` |
 | 3. Rolling consistency vs benchmark | ✅ `rolling_beat_benchmark_pct` (benchmark = index-fund proxy unless you supply a TRI csv with `import_tri.py`) |
 | 4. Benchmark excess return | ✅ `benchmark_excess_return` (same caveat) |
-| 5. Risk-adjusted return | ✅ Sharpe-style ratio + Sortino, as two separate weights (computed from 3y CAGR and monthly volatility, not from a full monthly excess-return series) |
+| 5. Risk-adjusted return | ✅ Sharpe-style ratio + Sortino, as two separate weights (computed from 3y CAGR and monthly volatility, not from a full monthly excess-return series). A single blended Sharpe/Sortino value is **dropped by decision** |
 | 6. Maximum drawdown | ✅ `max_drawdown`, over a common trailing 3-year window (`DRAWDOWN_WINDOW_YEARS`) |
 | 7. Expense ratio | ⛔ not implemented (excluded on request) |
 | 8. Portfolio quality | ✅ needs holdings files (see above); missing for funds without one |
@@ -657,7 +720,7 @@ columns, which `parse_navall` now reads from the header row (`navall_diag.py` sh
 | Non-zero exit on fatal errors | ✅ 1 = nothing ranked, 2 = bad input/config |
 | Automated tests for the scoring engine | ✅ `test_scoring.py`, `test_pipeline.py` |
 
-**CSV-input command line:** ✅ `rank_funds.py --input funds.csv` (section 6). **Not done from the spec:** a single blended `risk_adjusted_return` parameter (Sharpe/Sortino average) — they are two weights here.
+**CSV-input command line:** ✅ `rank_funds.py --input funds.csv` (section 6). **Comparing chosen funds:** ✅ `compare_funds.py` (section 7; not yet run against live data). **Not done from the spec, by decision:** a single blended `risk_adjusted_return` parameter (Sharpe/Sortino average) — it is not wanted; the two ratios stay as separate weights.
 
 **From the older blueprint document** (`mutual_fund_agent_architecture_prompting_blueprint.md`):
 downside capture, quartile consistency, Jensen's alpha and beta are implemented (off by default; the blueprint's own weights are not used — weights live in `weights.ini`); 3-year rolling returns with a 5-year option (`--rolling-years 5`); AUM, manager-tenure,

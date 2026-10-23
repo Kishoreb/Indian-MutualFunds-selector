@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 import config
+import name_match
 
 EXCEL_EXT = (".xls", ".xlsx", ".xlsm")
 
@@ -291,6 +292,7 @@ class PortfolioIndex:
         self.entries = []       # one dict per parsed scheme sheet
         self.warnings = []
         self.files_read = 0
+        self._matcher = None
         if os.path.isdir(self.root):
             for path in _excel_files(self.root):
                 self._read_file(path)
@@ -314,12 +316,24 @@ class PortfolioIndex:
                           keys={norm_scheme_name(c) for c in parsed["candidates"] if norm_scheme_name(c)})
             self.entries.append(parsed)
 
-    def lookup(self, scheme_name: str):
-        """Best matching entry for a scheme, or None. Exact normalised-name match first, then a
-        very close fuzzy match that must be unambiguous. Newest statement wins."""
+    def _title_matcher(self):
+        """Fallback matcher over the sheet titles (built once, on first use)."""
+        if self._matcher is None:
+            items = {}
+            for n, e in enumerate(self.entries):
+                for k, c in enumerate(e["candidates"]):
+                    title = re.split(r"\b(monthly|portfolio|statement|as on|as at)\b", c, flags=re.I)[0]
+                    if len(name_match.tokens(title, strip_code=False)) >= 2:
+                        items[(n, k)] = title.strip()
+            self._matcher = name_match.NameMatcher(items, strip_code_query=False, strip_code_items=False)
+        return self._matcher
+
+    def lookup_ex(self, scheme_name: str):
+        """(entry, how). how is '' for an exact / near-identical name match, or a 'verify' label when the entry was
+        found only by the name-similarity fallback (name_match.py). (None, '') when nothing matches."""
         target = norm_scheme_name(scheme_name)
         if not target:
-            return None
+            return None, ""
         exact = [e for e in self.entries if target in e["keys"]]
         if not exact:
             scored = []
@@ -328,12 +342,32 @@ class PortfolioIndex:
                 if best >= config.PQ_NAME_MATCH_RATIO:
                     scored.append((best, e))
             if not scored:
-                return None
+                return self._fallback(scheme_name)
             top = max(s for s, _ in scored)
             exact = [e for s, e in scored if s == top]
             if len({tuple(sorted(e["keys"])) for e in exact}) > 1:
-                return None  # ambiguous between different schemes -> don't guess
-        return max(exact, key=lambda e: (e["as_of"] if e["as_of"] is not None else pd.Timestamp.min, e["mtime"]))
+                return None, ""  # ambiguous between different schemes -> don't guess
+        return max(exact, key=lambda e: (e["as_of"] if e["as_of"] is not None else pd.Timestamp.min, e["mtime"])), ""
+
+    def _fallback(self, scheme_name: str):
+        if not name_match.setting("NAME_EMBED_ENABLED") or not self.entries:
+            return None, ""
+        m = self._title_matcher().match(scheme_name)
+        if m is None:
+            return None, ""
+        entry = self.entries[m.key[0]]
+        # every sheet whose title matches equally well is the same scheme in another month: newest wins
+        same = [e for e in self.entries if name_match.canon(m.name, False) in
+                {name_match.canon(re.split(r"\b(monthly|portfolio|statement|as on|as at)\b", c, flags=re.I)[0], False)
+                 for c in e["candidates"]}]
+        entry = max(same or [entry], key=lambda e: (e["as_of"] if e["as_of"] is not None else pd.Timestamp.min, e["mtime"]))
+        return entry, f"portfolio sheet matched by name similarity {m.score:.0%} ('{m.name[:50]}') - verify"
+
+    def lookup(self, scheme_name: str):
+        """Best matching entry for a scheme, or None. Exact normalised-name match first, then a
+        very close fuzzy match that must be unambiguous, then (name_match.py) a guarded similarity match.
+        Newest statement wins."""
+        return self.lookup_ex(scheme_name)[0]
 
 
 EMPTY_FIELDS = {"portfolio_quality": None, "pq_coverage": None, "pq_top10_pct": None, "pq_holdings": None,
@@ -346,7 +380,7 @@ def fields_for_fund(index: "PortfolioIndex | None", scheme_name: str) -> dict:
     out = dict(EMPTY_FIELDS)
     if index is None:
         return out
-    e = index.lookup(scheme_name)
+    e, how = index.lookup_ex(scheme_name)
     if e is None:
         out["pq_note"] = "no holdings file matched this scheme"
         return out
@@ -358,15 +392,17 @@ def fields_for_fund(index: "PortfolioIndex | None", scheme_name: str) -> dict:
     out.update(pq_top10_pct=inp.get("top10_pct"), pq_holdings=inp.get("n_holdings"),
                pq_top_sector_pct=inp.get("top_sector_pct"), pq_largemid_pct=inp.get("largemid_pct"),
                pq_cash_pct=inp.get("cash_pct"))
+    tail = f"; {how}" if how else ""
     if q["score"] is None:
-        out["pq_note"] = q["reason"]
+        out["pq_note"] = q["reason"] + tail
         return out
     if e["as_of"] is not None and config.PQ_MAX_AGE_DAYS is not None:
         age = (pd.Timestamp.now().normalize() - e["as_of"]).days
         if age > config.PQ_MAX_AGE_DAYS:
-            out["pq_note"] = f"statement is stale ({age} days old)"
+            out["pq_note"] = f"statement is stale ({age} days old)" + tail
             return out
     out["portfolio_quality"] = q["score"]
+    out["pq_note"] = how
     return out
 
 

@@ -56,6 +56,7 @@ import requests
 import benchmark
 import config
 import fetch_nav_data
+import name_match
 from metrics import compute_all_metrics
 
 # --------------------------------------------------------------------------
@@ -193,6 +194,7 @@ class AmfiIndex:
                 self.by_isin.setdefault(i, r)
         self.by_code = {r["code"]: r for r in recs}
         self._dg = None
+        self._matcher = None
 
     def _direct_growth(self):
         if self._dg is None:
@@ -211,6 +213,27 @@ class AmfiIndex:
         if len(scored) > 1 and scored[0][0] - scored[1][0] < NAME_MATCH_MARGIN:
             return None, 0.0
         return scored[0][2], scored[0][0]
+
+
+    def fallback_match(self, cas_name):
+        """Second-chance name match (name_match.py: character n-gram similarity, plus a local sentence-embedding
+        model when one is installed), with a guard against look-alike schemes. -> (record, score, reason).
+        Only called when ISIN and match_name() both found nothing; the result is always labelled 'verify'."""
+        if not name_match.setting("NAME_EMBED_ENABLED"):
+            return None, 0.0, "name-similarity fallback switched off"
+        if self._matcher is None:
+            items = {r["code"]: r["name"] for _, r in self._direct_growth()}
+            self._matcher = name_match.NameMatcher(items, strip_code_query=True, strip_code_items=False)
+        m = self._matcher.match(cas_name)
+        if m is None:
+            return None, 0.0, self._matcher.last_reason
+        return self.by_code[m.key], m.score, ""
+
+    def name_conflict(self, cas_name, rec):
+        """Does the name printed on the statement describe a different scheme from the one the ISIN maps to?
+        -> name_match.compare() result with severity none / mild / severe."""
+        emb = name_match.default_embedder() if name_match.setting("NAME_EMBED_ENABLED") else None
+        return name_match.compare(cas_name, rec["name"], strip_code_a=True, strip_code_b=False, embedder=emb)
 
 
 def load_navall(path=None, force=False, log=print):
@@ -395,6 +418,13 @@ def decide(f, rules=REVIEW_RULES, rf=None):
         return result(V_REVIEW, "n/a", "holdings file")
     if not f.get("mapped"):
         notes.append("Could not map this ISIN or name to an AMFI scheme - check the ISIN in the holdings file.")
+        if f.get("why_unmapped"):
+            notes.append("Name-similarity fallback: " + f["why_unmapped"] + ".")
+        return result(V_NODATA)
+    if f.get("name_conflict"):
+        notes.append("ISIN and printed name disagree - the ISIN may have been misread or the scheme renamed. "
+                     + f["name_conflict"] + " Check the ISIN against your statement before relying on any "
+                     "analysis of this fund.")
         return result(V_NODATA)
     if f.get("nav_error"):
         notes.append(f"NAV history could not be fetched ({f['nav_error']}).")
@@ -505,16 +535,26 @@ def analyse(rows, index, peers=True, refresh=False, workers=4, today=None, log=p
         if key in units:
             r["_u"] = units[key]
             continue
-        rec, how = None, ""
+        rec, how, conflict, why_not = None, "", None, ""
         if r["ISIN"] in index.by_isin:
             rec, how = index.by_isin[r["ISIN"]], "ISIN"
+            conflict = index.name_conflict(r["Scheme Name"], rec)
         else:
             rec, ratio = index.match_name(r["Scheme Name"])
             if rec:
                 how = f"Name match {ratio:.0%} (ISIN not found - verify)"
+            else:
+                rec, score, why_not = index.fallback_match(r["Scheme Name"])
+                if rec:
+                    how = f"Name similarity {score:.0%} (ISIN not found - verify)"
         zero = (_num(r.get("Valuation (Rs)")) or 0) == 0
         u = {"rec": rec, "how": how, "zero_value": zero, "mapped": rec is not None,
-             "category": rec["category"] if rec else "", "isin": r["ISIN"]}
+             "category": rec["category"] if rec else "", "isin": r["ISIN"], "why_unmapped": why_not,
+             "name_conflict": conflict["severity"] if conflict else "none",
+             "name_conflict_note": ("" if not conflict or conflict["severity"] == "none" else
+                                    f"The ISIN maps to '{rec['name']}' but the statement prints "
+                                    f"'{r['Scheme Name']}' ({conflict['reason'] or 'names differ'}; "
+                                    f"similarity {conflict['similarity']:.0%}).")}
         u["category_short"] = short_category(u["category"])
         units[key] = u
         r["_u"] = u
@@ -578,7 +618,9 @@ def analyse(rows, index, peers=True, refresh=False, workers=4, today=None, log=p
         m = u.get("m", {})
         facts = {"zero_value": u["zero_value"], "mapped": u["mapped"], "nav_error": u.get("nav_error"),
                  "category_short": u["category_short"], "peer": u.get("peer"),
-                 "peer_unranked": u.get("peer_unranked", False)}
+                 "peer_unranked": u.get("peer_unranked", False),
+                 "name_conflict": u["name_conflict_note"] if u["name_conflict"] == "severe" else "",
+                 "why_unmapped": u["why_unmapped"]}
         facts.update({k: m.get(k) for k in (
             "history_years", "nav_age_days", "last_nav_date", "cagr_3y", "cagr_5y", "max_drawdown",
             "benchmark_excess_return", "rolling_beat_benchmark_pct", "benchmark_name")})
@@ -677,6 +719,8 @@ def new_values(r, today):
     data_notes = list(d["notes"])
     if u["mapped"] and u["how"] != "ISIN":
         data_notes.append("Matched by scheme name, not ISIN - verify the match.")
+    if u["name_conflict"] == "mild":
+        data_notes.append("Name differs from AMFI's (possible rename): " + u["name_conflict_note"])
     vals = {
         "Verdict": d["verdict"], "Confidence": d["confidence"], "Why (summary)": summary,
         "Red flags": _bullets(d["red"]), "Amber flags": _bullets(d["amber"]),
@@ -793,6 +837,10 @@ def build_sheets(headers, rows, info, today, source):
         "Benchmark excess return uses an index-fund proxy for the benchmark unless you supplied a TRI csv in "
         "data/benchmarks/ (see README), so it is slightly flattered.",
         "Peer groups come from AMFI's category for the scheme; a young fund with less history than needed is not ranked.",
+        "Scheme mapping: the ISIN is used first. If it is not in AMFI's list the printed name is matched (difflib, then "
+        "a guarded name-similarity fallback, name_match.py; a local sentence-embedding model is used only if installed). "
+        "Name matches are labelled 'verify'. When the ISIN IS found but the printed name describes a clearly different "
+        "scheme, the verdict is INSUFFICIENT DATA until you check the ISIN.",
         "", ("This run", "title"),
     ]
     for line in info.get("benchmarks", []):

@@ -51,6 +51,14 @@ Usage
     python cdsl_holdings_to_xls.py cas.pdf --skip-mf          # stocks only, as before
     python cdsl_holdings_to_xls.py cas.pdf --password ABCDE1234F
     python cdsl_holdings_to_xls.py cas.pdf --pages 17-29 --force-ocr
+    python cdsl_holdings_to_xls.py cas.pdf --navall NAVAll.txt   # ISINs checked against AMFI's list (isin_verify.py)
+    python cdsl_holdings_to_xls.py cas.pdf --no-verify           # skip that check
+
+ISIN verification (isin_verify.py)
+  When AMFI's NAVAll.txt is available (--navall FILE, or data/NAVAll.txt left by mf_holdings_screener.py) every
+  mutual fund ISIN is also checked against AMFI's list of real ISINs and against the scheme name printed next to
+  it. A damaged ISIN is repaired only when exactly one real ISIN within a few OCR-style character changes fits the
+  name; conflicts and doubtful ISINs are flagged in the Check column and never changed silently.
 """
 
 import argparse
@@ -1103,6 +1111,37 @@ def write_mf_xlsx(path, rows, recon):
 
 
 # --------------------------------------------------------------------------
+def load_verifier(navall=None):
+    """isin_verify.IsinVerifier built from AMFI's NAVAll.txt (and the share list, if configured), or None when the
+    list is not available / the module is missing - the extraction then works exactly as before."""
+    try:
+        import isin_verify
+    except ImportError:
+        return None
+    path = isin_verify.find_navall(navall)
+    if not path:
+        if navall:
+            print(f"ISIN verification skipped: {navall} not found")
+        else:
+            print("ISIN verification skipped: no data/NAVAll.txt (pass --navall FILE to switch it on)")
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        uni = isin_verify.parse_universe(fh.read())
+    if not uni:
+        print(f"ISIN verification skipped: {path} has no scheme rows")
+        return None
+    stocks = set()
+    try:
+        import config
+        csv = getattr(config, "AMFI_MARKETCAP_CSV", None)
+        if csv and os.path.exists(csv):
+            stocks = isin_verify.parse_stock_universe(csv)
+    except Exception:
+        pass
+    print(f"ISIN verification on: {len(uni)} AMFI ISINs" + (f", {len(stocks)} share ISINs" if stocks else "") + f" ({path})")
+    return isin_verify.IsinVerifier(uni, stocks)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Extract demat stock holdings and mutual fund holdings from a CDSL CAS PDF into Excel.")
@@ -1118,6 +1157,8 @@ def main():
     ap.add_argument("--force-ocr", action="store_true", help="ignore any text layer and OCR the page images")
     ap.add_argument("--workers", type=int, default=4, help="parallel OCR workers (default 4)")
     ap.add_argument("--tesseract-cmd", help="full path to tesseract executable (Windows)")
+    ap.add_argument("--navall", help="AMFI NAVAll.txt for ISIN verification (default: data/NAVAll.txt if present)")
+    ap.add_argument("--no-verify", action="store_true", help="do not check ISINs against AMFI's list")
     a = ap.parse_args()
 
     if a.tesseract_cmd:
@@ -1133,6 +1174,12 @@ def main():
         mf_out = os.path.splitext(a.pdf)[0] + "-MF.XLS"
 
     rows, stated, stop_page = extract(a.pdf, a.password, a.pages, a.dpi, a.force_ocr, a.workers)
+    verifier = None if a.no_verify else load_verifier(a.navall)
+    if verifier is not None and verifier.stocks:
+        import isin_verify
+        isin_verify.apply_to_stock_rows(rows, verifier)
+        print(isin_verify.summarize(verifier) + "  (shares)")
+        verifier.counts.clear()
     recon = reconcile(rows, stated)
     (write_xlsx if out.lower().endswith(".xlsx") else write_xls)(out, rows, recon)
 
@@ -1155,6 +1202,10 @@ def main():
         print("No mutual fund rows were found (no 'MUTUAL FUND UNITS HELD AS ON' table, or it could not be "
               "read). Try --force-ocr, a higher --dpi, or --pages.")
         return
+    if verifier is not None:
+        import isin_verify
+        isin_verify.apply_to_mf_rows(mf_rows, verifier)
+        print(isin_verify.summarize(verifier))
     mf_recon = reconcile_mf(mf_rows, printed)
     (write_mf_xlsx if mf_out.lower().endswith(".xlsx") else write_mf_xls)(mf_out, mf_rows, mf_recon)
 
