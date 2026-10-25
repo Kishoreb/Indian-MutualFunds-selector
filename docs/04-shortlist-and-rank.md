@@ -1,7 +1,7 @@
 # Shortlist and rank funds in a category
 
 Audience: anyone who needs to understand how the project's core capability works end to end, from a typed category name to a ranked shortlist with scored explanations, to maintain, extend or audit the scoring pipeline.
-Evidence: 15 of 15 entry points read · 8 capabilities · 14 open unknowns relevant to this document · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
+Evidence: 15 of 15 entry points read · 8 capabilities · 9 open unknowns relevant to this document · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
 
 C01, "Shortlist and rank funds in a category", is the capability the whole project exists for. Every other capability either feeds it (C05 portfolio quality, C06 benchmarks, C07 signal back-testing), reuses its engine (C02 holdings screener, C03 single-fund check, C04 CSV ranking), or supports it (C08 setup and diagnostics) [capabilities.md].
 

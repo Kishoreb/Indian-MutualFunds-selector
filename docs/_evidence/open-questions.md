@@ -17,7 +17,6 @@ Questions the code could not answer, grouped by who can answer them. Updated 202
 | U12 (S02) | Which index fund is the benchmark proxy today for each of the 11 categories in `config.BENCHMARKS`, and are TRI files present in `data/benchmarks/`? | Benchmark metrics carry 20% of the shipped weights. | S02 | open |
 | U13 (S03) | Does the test suite pass today? At least five assertions in `test_scoring.py`, `test_new_metrics.py` and `test_pipeline.py` expect values the current `weights.ini` no longer has (11 weighted metrics, `cagr_3y` 15, method `zscore`, alpha and beta at 0). Contradiction between tests and `weights.ini`. | A failing suite hides real faults. | S03 | open |
 | U15 (S04) | Does any test exercise the real `report.export_to_excel` or `report_md.explain`? | `test_pipeline.py` fakes the Excel export. | S04 | open |
-| U16 (S04) | Is the Word report conversion (`report_docx.py`) tested? | Next probe: search `report_docx` in `test_*.py`. | S04 | open |
 | U17 (S04) | `config.py` defines none of the `BACKTEST_*`, `FORWARD_*` or `MANIFEST_JSON` settings that `backtest.py`, `forward_signals.py` and `test_forward_signals.py` use, and nothing calls `manifest.write_manifest`. Is `config.py` an older copy, and does `backtest.py` run at all? Contradiction between `config.py` and these modules. | Decides whether capability C07 works. | S04 | open |
 | U18 (S05) | What happens at a real run when AMFI blocks the `NAVAll.txt` download or changes its layout again? Nothing tests the download path. | The holdings screener cannot start without that file. | S05 | open |
 
@@ -65,3 +64,4 @@ Questions the code could not answer, grouped by who can answer them. Updated 202
 |---|---|---|---|
 | U08 | `my_review.xls` and `mfReview.xls` are the owner's own reviews of the outcome of some runs on some funds. Whether `mf_holdings_screener.py` reads them as input is not yet checked. | product owner, 2026-10-24 | none yet |
 | U09 | `out_smallcap/` is a sample run and is to be documented as one. | product owner, 2026-10-24 | none yet |
+| U16 | Yes, `report_docx.py` is tested: `test_check_fund.py`'s CLI test writes a `.docx` file and checks it exists, with table-presence and no-raw-markdown assertions when `python-docx` is installed at test time (skipped otherwise). | S07, 2026-10-25 | 09-test-exposure-map.md |

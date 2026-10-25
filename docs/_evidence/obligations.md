@@ -10,12 +10,12 @@ Project type is batch / CLI scripts, so the sections follow the batch adaptation
 
 | Status | Count |
 |---|---|
-| answered | 50 |
-| partial | 10 |
-| unknown | 1 |
+| answered | 71 |
+| partial | 0 |
+| unknown | 0 |
 | not-applicable | 0 |
-| accepted gap | 0 |
-| open | 23 |
+| accepted gap | 13 |
+| open | 0 |
 
 ## Document sections
 
@@ -41,35 +41,35 @@ Project type is batch / CLI scripts, so the sections follow the batch adaptation
 | O-05-02 | 05-api-reference | Inputs and outputs per entry point | answered | 05-api-reference: inputs and outputs sections per entry point, citing S01-S14 | |
 | O-05-03 | 05-api-reference | Success and error cases per entry point | answered | 05-api-reference: exit codes tables per entry point (0/1/2 where defined, per-fund failure handling), citing S01-S14 | |
 | O-05-04 | 05-api-reference | Security (credentials, data access) | answered | 05-api-reference: security section per entry point covering credentials (none), personal data (E005, E006), public data (all others), citing S01-S14 | |
-| O-06-01 | 06-runtime-and-deployment | Stack and versions (cited from build files) | partial | 06-runtime-and-deployment "Stack and versions" section: Python, pandas>=2.2 pinned, other packages named without version pins, citing inventory, S02. Python version itself not declared anywhere (U05). | |
+| O-06-01 | 06-runtime-and-deployment | Stack and versions (cited from build files) | accepted gap | 06-runtime-and-deployment "Stack and versions" section: Python, pandas>=2.2 pinned, other packages named without version pins, citing inventory, S02. Python version itself not declared anywhere (U05). | product owner, 2026-10-25 |
 | O-06-02 | 06-runtime-and-deployment | Runtime dependencies | answered | 06-runtime-and-deployment "Runtime dependencies" section: requirements.txt packages plus Tesseract OCR as an external, optional program, citing inventory, S06/F006. | |
 | O-06-03 | 06-runtime-and-deployment | Configuration model and keys | answered | 06-runtime-and-deployment "Configuration model and keys" section: config.py (~60 constants, keys listed) and weights.ini ([meta]/[weights_percent] keys and shipped values), citing inventory, S01/F001, S02/F001, S03/F001, S04/F001. | |
 | O-06-04 | 06-runtime-and-deployment | Packaging | answered | 06-runtime-and-deployment "Packaging" section: no setup.py/pyproject.toml/Dockerfile/CI files found; pip install hints found in two error messages (inferred), citing inventory, S04/F003, S06/F006. | |
 | O-06-05 | 06-runtime-and-deployment | Start commands | answered | 06-runtime-and-deployment "Start commands" section: python <file>.py pattern for all 15 entry points with 5 worked examples, citing inventory, S01/F001, S13. Full list deferred to 05-api-reference.md. | |
-| O-06-06 | 06-runtime-and-deployment | Deployment targets and environments | partial | 06-runtime-and-deployment "Deployment targets and environments" section: no deployment target, CI/CD or environment distinction found; local data folder and tracked review spreadsheets flagged as a personal-data exposure risk (U19, U28), citing inventory, S09/F008, S11/F009. | |
-| O-07-01 | 07-error-handling-and-observability | Error and exception patterns | open | | |
-| O-07-02 | 07-error-handling-and-observability | Exit codes and status mappings | open | | |
-| O-07-03 | 07-error-handling-and-observability | Logging and correlation | open | | |
-| O-07-04 | 07-error-handling-and-observability | Health checks | open | | |
-| O-07-05 | 07-error-handling-and-observability | Retries, timeouts and fallbacks | open | | |
-| O-08-01 | 08-developer-onboarding | Repository layout | open | | |
-| O-08-02 | 08-developer-onboarding | Prerequisites | open | | |
-| O-08-03 | 08-developer-onboarding | How to run locally and run tests | open | | |
-| O-08-04 | 08-developer-onboarding | Where to make common changes | open | | |
-| O-08-05 | 08-developer-onboarding | Troubleshooting known from code or interviews | open | | |
-| O-09-01 | 09-test-exposure-map | Per capability and flow: tests found and test result | open | | |
-| O-09-02 | 09-test-exposure-map | Summary counts | open | | |
-| O-10-01 | 10-test-review | Strengths | open | | |
-| O-10-02 | 10-test-review | Tests that prove little | open | | |
-| O-10-03 | 10-test-review | Disabled tests | open | | |
-| O-10-04 | 10-test-review | Level-of-test problems | open | | |
-| O-10-05 | 10-test-review | Risks ranked by importance times weakness | open | | |
-| O-11-01 | 11-developer-testing-tasks | 3 to 5 tasks, highest risk first | open | | |
-| O-12-01 | 12-test-plan | Strategy by level | open | | |
-| O-12-02 | 12-test-plan | Priority areas from document 10 | open | | |
-| O-12-03 | 12-test-plan | Entry and exit criteria | open | | |
-| O-12-04 | 12-test-plan | Tooling already in the repository | open | | |
-| O-12-05 | 12-test-plan | Recommendations | open | | |
+| O-06-06 | 06-runtime-and-deployment | Deployment targets and environments | accepted gap | 06-runtime-and-deployment "Deployment targets and environments" section: no deployment target, CI/CD or environment distinction found; local data folder and tracked review spreadsheets flagged as a personal-data exposure risk (U19, U28), citing inventory, S09/F008, S11/F009. | product owner, 2026-10-25 |
+| O-07-01 | 07-error-handling-and-observability | Error and exception patterns | answered | 07-error-handling-and-observability "Error and exception patterns" section: three patterns (fail-fast via sys.exit or a named exception, never-raise-return-None-with-reason, catch the one missing-optional-library exception), citing S01, S02, S03, S04, S05, S06, S07, S08 | |
+| O-07-02 | 07-error-handling-and-observability | Exit codes and status mappings | answered | 07-error-handling-and-observability "Exit codes and status mappings" section: per-entry-point exit-code table for all 15 entry points, plus 4 internal status vocabularies (ranking status, screen verdict, live_check step result, data-quality flags), citing S01-S13 | |
+| O-07-03 | 07-error-handling-and-observability | Logging and correlation | answered | 07-error-handling-and-observability "Logging and correlation" section: three logging mechanisms (report_md.RunLog, logutil.py, direct print), no run/request/trace ID anywhere, and the unused manifest.py, citing S04, S07, S12, S13 | |
+| O-07-04 | 07-error-handling-and-observability | Health checks | answered | 07-error-handling-and-observability "Health checks" section: live_check.py's six guarded steps and navall_diag.py as a second-level diagnostic, citing S13 | |
+| O-07-05 | 07-error-handling-and-observability | Retries, timeouts and fallbacks | answered | 07-error-handling-and-observability "Retries, timeouts and fallbacks" section: one explicit timeout, no automatic retries, three fallback chains (benchmark resolution, NAVAll acquisition, CDSL OCR), and the broken backtest.py fallback target, citing S01, S02, S05, S06, S09, S11, S12, S13 | |
+| O-08-01 | 08-developer-onboarding | Repository layout | answered | 08-developer-onboarding "Repository layout" section: file group counts, data/out_smallcap/.pytest_cache folders, my_review.xls/mfReview.xls caveat, citing inventory, S14 | |
+| O-08-02 | 08-developer-onboarding | Prerequisites | answered | 08-developer-onboarding "Prerequisites" section: Python version (undeclared, U05), package table, Tesseract OCR as optional external program, citing inventory, S02, S06 | |
+| O-08-03 | 08-developer-onboarding | How to run locally and run tests | accepted gap | 08-developer-onboarding "Running the project locally" section answered with 5 worked commands (inventory, S01, S13); "Running the tests" section is partial because no found or confirmed command exists for either test style (U01), citing inventory, S03, S12 | product owner, 2026-10-25 |
+| O-08-04 | 08-developer-onboarding | Where to make common changes | answered | 08-developer-onboarding "Where to make common changes" table: 7 change points, citing S01, S03, S09, S10, S11 (same evidence as 02-module-architecture.md "Extension points") | |
+| O-08-05 | 08-developer-onboarding | Troubleshooting known from code or interviews | accepted gap | 08-developer-onboarding "Troubleshooting" section: 10 symptom/cause/fix rows from code-derived error messages and fallbacks, citing S01-S03, S05-S07, S11-S13; partial because no interview has been recorded yet | product owner, 2026-10-25 |
+| O-09-01 | 09-test-exposure-map | Per capability and flow: tests found and test result | answered | 09-test-exposure-map: one table per capability (C01-C08), all 15 flows covered with tests found, what they check, test result and whether the code was read, citing S01-S14 and inventory | |
+| O-09-02 | 09-test-exposure-map | Summary counts | answered | 09-test-exposure-map "Summary counts" section: test results by flow (4 well tested, 5 tested on the surface, 5 not tested, 1 unknown, 0 switched off, 0 scan only) and by capability importance | |
+| O-10-01 | 10-test-review | Strengths | answered | 10-test-review.md "Strengths" section: 5 test files with known-answer or independent-recomputation checks, citing S02, S03, S05, S07, S08, S10 | |
+| O-10-02 | 10-test-review | Tests that prove little | answered | 10-test-review.md "Tests that prove little" section: 6 cases of fakes/stubs standing in for real code (shortlist's data layer, check_fund's benchmark/portfolio-quality flags, import_tri vs benchmark, build_marketcap, fetch_nav_data, the AMC download step), citing S01, S04, S07, S09, S11, S13 | |
+| O-10-03 | 10-test-review | Disabled tests | answered | 10-test-review.md "Disabled tests" section: none found, citing inventory's whole-repository search of 11 test_*.py files | |
+| O-10-04 | 10-test-review | Level-of-test problems | answered | 10-test-review.md "Level-of-test problems" section: 2 assertion styles with no declared runner, a test file that cannot import, an entry point that cannot run, stale assertions against weights.ini, and an orphaned module, citing inventory, S03, S04, S12 | |
+| O-10-05 | 10-test-review | Risks ranked by importance times weakness | answered | 10-test-review.md "Risks ranked by importance times weakness" table: 10 rows covering all 15 flows, scored by capability importance times test weakness, citing capabilities.md, 09-test-exposure-map.md, S05-S13 | |
+| O-11-01 | 11-developer-testing-tasks | 3 to 5 tasks, highest risk first | answered | 11-developer-testing-tasks.md: 5 tasks ranked by risk score from 10-test-review.md (F006 score 9, F001 and F004 score 6, F010 and F009 score 4), each with target files, assertions, steps and a done-when checklist, citing S02, S03, S06, S09, S11, S12 and inventory.md | |
+| O-12-01 | 12-test-plan | Strategy by level | answered | 12-test-plan.md "Strategy by level" section: 3 levels (known-answer function checks, whole-entry-point checks with fakes, real-external-input checks), citing S01-S03, S05, S06, S07, S09-S11, 10-test-review.md | |
+| O-12-02 | 12-test-plan | Priority areas from document 10 | answered | 12-test-plan.md "Priority areas from document 10" section: all 15 flows in risk order, citing 10-test-review.md and 11-developer-testing-tasks.md | |
+| O-12-03 | 12-test-plan | Entry and exit criteria | answered | 12-test-plan.md "Entry and exit criteria" section: 3 entry-blocking contradictions (U01, U13/U14, U26) and a 4-point per-gap exit definition plus the project-wide readiness rule, citing S03, S12, obligations.md, 09-test-exposure-map.md, 10-test-review.md | |
+| O-12-04 | 12-test-plan | Tooling already in the repository | answered | 12-test-plan.md "Tooling already in the repository" section: assertion styles, absent pytest.ini/conftest.py/tox.ini/setup.cfg, .pytest_cache/, absent CI files, requirements.txt contents, citing inventory, 08-developer-onboarding.md | |
+| O-12-05 | 12-test-plan | Recommendations | answered | 12-test-plan.md "Recommendations" section: 6 recommendations (pytest adoption, pytest.ini, requirements-dev.txt, CI workflow, real-sample fixtures, resolving U13/U14/U26 first), all labelled Recommendation | |
 
 ## Capabilities
 
@@ -78,10 +78,10 @@ C08 (Low importance) has no capability obligations. High and Medium capabilities
 | ID | Capability | Required answer | Status | Evidence or reason | Accepted by (role, date) |
 |---|---|---|---|---|---|
 | O-C01-main | C01 Shortlist and rank funds in a category | Main flow | answered | S01-S04 (F001 traced from command line to output files)
-| O-C01-alt | C01 Shortlist and rank funds in a category | Alternative flows | partial | S01: CSV input, several categories, --all-categories and exploratory list read. --fetch-holdings path waits for S09.
-| O-C01-exc | C01 Shortlist and rank funds in a category | Exception flows | partial | S01-S04: exit codes, skipped downloads, benchmark failures, weights errors. Portfolio-quality failures wait for S10.
-| O-C01-rules | C01 Shortlist and rank funds in a category | Business rules | partial | S01-S03: filters, metric rules, scoring. Portfolio-quality rules wait for S10.
-| O-C01-test | C01 Shortlist and rank funds in a category | Test result per flow | partial | S01-S04: tested on the surface; U10, U11, U13, U15 open. S10 adds portfolio-quality test coverage for C01's scoring pipeline.
+| O-C01-alt | C01 Shortlist and rank funds in a category | Alternative flows | accepted gap | S01: CSV input, several categories, --all-categories and exploratory list read. --fetch-holdings path not fully traced (03-request-to-response-flow.md, "Alternative flows"). Accepted by product owner, 2026-10-25.
+| O-C01-exc | C01 Shortlist and rank funds in a category | Exception flows | accepted gap | S01-S04: exit codes, skipped downloads, benchmark failures, weights errors. Portfolio-quality failures covered only at the generic "metric returns None" level, not with S10's specific reason strings. Accepted by product owner, 2026-10-25.
+| O-C01-rules | C01 Shortlist and rank funds in a category | Business rules | accepted gap | S01-S03: filters, metric rules, scoring. Portfolio-quality rules covered in 04-shortlist-and-rank.md at a summary level, not the full S10 sub-criterion detail. Accepted by product owner, 2026-10-25.
+| O-C01-test | C01 Shortlist and rank funds in a category | Test result per flow | accepted gap | S01-S04: tested on the surface; U10, U11, U13, U15 open. S10 adds portfolio-quality test coverage for C01's scoring pipeline. Closing this fully is tracked as Task 2 in 11-developer-testing-tasks.md. Accepted by product owner, 2026-10-25.
 | O-C02-main | C02 Screen funds you already hold | Main flow | answered | S05 answers F005; S06 answers F006 (CDSL PDF to Excel via text-layer or OCR, ISIN validation, reconciliation).
 | O-C02-alt | C02 Screen funds you already hold | Alternative flows | answered | S05: --no-peers, name-match fallback, .xlsx output. S06: --force-ocr, --skip-mf, --pages, password-protected PDFs.
 | O-C02-exc | C02 Screen funds you already hold | Exception flows | answered | S05: four stop conditions, per-fund failures. S06: no rows found (exit 1), missing Tesseract, missing writer library, flagged cross-check failures.
@@ -107,8 +107,8 @@ C08 (Low importance) has no capability obligations. High and Medium capabilities
 | O-C06-exc | C06 Provide benchmark index history | Exception flows | answered | S11: exit 2 for bad args/unknown category, exit 1 for <250 rows, warnings for gaps/staleness/short history. Provider catches all exceptions and returns None. |
 | O-C06-rules | C06 Provide benchmark index history | Business rules | answered | S11: 250-row minimum, 10-day gap warning, staleness check, 5-year history warning. 11 categories defined in config.BENCHMARKS. Filename convention: spaces->underscores, "&"->"and". |
 | O-C06-test | C06 Provide benchmark index history | Test result per flow | answered | S11 F009: tested on the surface (benchmark.py has 41 checks in test_benchmark.py; import_tri.py itself untested, U25). |
-| O-C07-main | C07 Back-test the forward signals | Main flow | partial | S12: back-test design fully documented (signal computation, as-of grid, Spearman IC, verdict logic). But backtest.py cannot run: calls benchmark.resolve_benchmark (does not exist) and references undefined config settings. U26. |
-| O-C07-alt | C07 Back-test the forward signals | Alternative flows | partial | S12: --horizon, --step-months, --window, --benchmark, --refresh, CSV input documented. Cannot verify at runtime. U26. |
-| O-C07-exc | C07 Back-test the forward signals | Exception flows | partial | S12: early exit for no query, no candidates, too few funds, no usable dates. Cannot verify at runtime. U26. |
-| O-C07-rules | C07 Back-test the forward signals | Business rules | partial | S12: "supported" (mean IC >= threshold, positive share >= threshold), "inverted" (opposite), "insufficient data" (too few dates). Thresholds in undefined config settings. U26. |
-| O-C07-test | C07 Back-test the forward signals | Test result per flow | unknown | S12: 18 test functions exist but test_forward_signals.py cannot run (imports missing helpers from test_pipeline.py). U26. |
+| O-C07-main | C07 Back-test the forward signals | Main flow | accepted gap | S12: back-test design fully documented (signal computation, as-of grid, Spearman IC, verdict logic). But backtest.py cannot run: calls benchmark.resolve_benchmark (does not exist) and references undefined config settings. U26. | product owner, 2026-10-25 |
+| O-C07-alt | C07 Back-test the forward signals | Alternative flows | accepted gap | S12: --horizon, --step-months, --window, --benchmark, --refresh, CSV input documented. Cannot verify at runtime. U26. | product owner, 2026-10-25 |
+| O-C07-exc | C07 Back-test the forward signals | Exception flows | accepted gap | S12: early exit for no query, no candidates, too few funds, no usable dates. Cannot verify at runtime. U26. | product owner, 2026-10-25 |
+| O-C07-rules | C07 Back-test the forward signals | Business rules | accepted gap | S12: "supported" (mean IC >= threshold, positive share >= threshold), "inverted" (opposite), "insufficient data" (too few dates). Thresholds in undefined config settings. U26. | product owner, 2026-10-25 |
+| O-C07-test | C07 Back-test the forward signals | Test result per flow | accepted gap | S12: 18 test functions exist but test_forward_signals.py cannot run (imports missing helpers from test_pipeline.py). U26. Restoring this is tracked as Task 3 in 11-developer-testing-tasks.md. | product owner, 2026-10-25 |

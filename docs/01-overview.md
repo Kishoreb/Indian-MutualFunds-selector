@@ -1,7 +1,7 @@
 # Overview
 
 Audience: anyone joining this project or evaluating it for the first time, to understand what it does, how its parts fit together, and what each capability covers.
-Evidence: 15 of 15 entry points read · 8 capabilities · 9 open unknowns relevant to this document · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
+Evidence: 15 of 15 entry points read · 8 capabilities · 7 open unknowns relevant to this document · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
 
 ## What the project does and for whom
 

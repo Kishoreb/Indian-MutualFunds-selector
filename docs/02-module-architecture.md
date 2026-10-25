@@ -1,7 +1,7 @@
 # Module architecture
 
 Audience: a developer reading the code for the first time, to understand what each file does, how they depend on each other, and where the project's own mechanisms live.
-Evidence: 15 of 15 entry points read · 16 library modules read · 11 test files inventoried · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
+Evidence: 15 of 15 entry points read · 16 library modules read · 11 test files inventoried · 3 open unknowns · commit ef2fb5a · Surveyor 2.2.0 · 2026-10-24
 
 ## Module layout
 
@@ -48,7 +48,7 @@ Each is started with `python <file>.py` and uses `argparse` for its command line
 | `report_md.py` | 267 | Writes the Markdown ranking report with per-fund breakdown, and provides the `RunLog` class for run logging. [S04] | `shortlist.py`, `rank_funds.py`, `check_fund.py` |
 | `report_docx.py` | 142 | Converts a Markdown report to a Word document (headings, tables, bullets). [S04] | `check_fund.py` |
 | `forward_signals.py` | 434 | Defines 9 forward-looking signals and a tilt-and-blend mechanism. Cannot run fully at this commit (U26). [S12] | `backtest.py` |
-| `manifest.py` | 70 | Writes a JSON run manifest. No caller found at this commit. [S04] | None (U17) |
+| `manifest.py` | 70 | Writes a JSON run manifest. No caller found (searched `manifest` across `*.py` at the repository root) [S04]. | None (U17) |
 | `logutil.py` | 51 | Standard-library logging helpers. [S04] | `backtest.py`, `forward_signals.py` |
 
 ### Configuration files
@@ -192,7 +192,7 @@ graph TD
     cdsl --> config
 ```
 
-Dashed lines: `backtest.py`, `forward_signals.py` and `logutil.py` are connected with dashes because `backtest.py` cannot run at this commit (calls `benchmark.resolve_benchmark`, which does not exist, and references undefined config settings). `manifest.py` is omitted because no caller was found [S04, S12, U17, U26].
+Dashed lines: `backtest.py`, `forward_signals.py` and `logutil.py` are connected with dashes because `backtest.py` cannot run at this commit (calls `benchmark.resolve_benchmark`, which does not exist, and references undefined config settings). `manifest.py` is omitted because no caller was found (searched `manifest` across `*.py` at the repository root) [S04, S12, U17, U26].
 
 `cdsl_holdings_to_xls.py` imports only `config.py` (for `DATA_DIR`) and standard libraries. It is the most self-contained entry point [S06].
 
